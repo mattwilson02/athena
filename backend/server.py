@@ -14,6 +14,7 @@ from vault_parser import VaultParser
 from vault_graph import VaultGraph
 from vector_search import VectorIndex
 from mentor_agent import MentorAgent
+from chat_store import ChatStore
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,9 @@ parser = VaultParser(vault_path)
 graph = VaultGraph()
 vector_index = VectorIndex(
     persist_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
+)
+chat_store = ChatStore(
+    store_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_sessions")
 )
 
 
@@ -55,7 +59,40 @@ else:
     logger.warning("ANTHROPIC_API_KEY not set — chat and insights endpoints disabled")
 
 
-# --- Chat Endpoints ---
+# --- Session Endpoints ---
+
+
+@app.route("/api/chat/sessions", methods=["GET"])
+def list_sessions():
+    """List all chat sessions."""
+    return jsonify({"sessions": chat_store.list_sessions()})
+
+
+@app.route("/api/chat/sessions", methods=["POST"])
+def create_session():
+    """Create a new chat session."""
+    session = chat_store.create_session()
+    return jsonify(session), 201
+
+
+@app.route("/api/chat/sessions/<session_id>", methods=["GET"])
+def get_session(session_id: str):
+    """Get a session with all messages."""
+    session = chat_store.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify(session)
+
+
+@app.route("/api/chat/sessions/<session_id>", methods=["DELETE"])
+def delete_session(session_id: str):
+    """Delete a chat session."""
+    if not chat_store.delete_session(session_id):
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify({"ok": True})
+
+
+# --- Chat Endpoint ---
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -68,21 +105,45 @@ def chat():
     if not data or not data.get("message", "").strip():
         return jsonify({"error": "message is required"}), 400
 
+    session_id = data.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+
+    # Verify session exists
+    session = chat_store.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    message = data["message"]
+
+    # Save user message
+    chat_store.append_message(session_id, {"role": "user", "content": message})
+
+    # Get conversation history for Claude (role + content only)
+    history = chat_store.get_messages_for_api(session_id)
+    # Remove the last message (the one we just added) — mentor.chat() adds it itself
+    history = history[:-1]
+
     try:
-        result = mentor.chat(data["message"])
-        return jsonify(result)
+        result = mentor.chat(message, history)
     except anthropic.AuthenticationError:
         return jsonify({"error": "Invalid ANTHROPIC_API_KEY"}), 401
     except anthropic.APIError as e:
         return jsonify({"error": f"Claude API error: {e}"}), 502
 
+    # Save assistant message (with full response for Claude context continuity)
+    chat_store.append_message(session_id, {
+        "role": "assistant",
+        "content": result["full_response"],
+        "graph_updates": result["graph_updates"],
+        "relevant_nodes": result["relevant_nodes"],
+    })
 
-@app.route("/api/chat/reset", methods=["POST"])
-def chat_reset():
-    """Clear conversation history."""
-    if mentor:
-        mentor.reset()
-    return jsonify({"ok": True})
+    return jsonify({
+        "response": result["response"],
+        "graph_updates": result["graph_updates"],
+        "relevant_nodes": result["relevant_nodes"],
+    })
 
 
 # --- Insights Endpoint ---

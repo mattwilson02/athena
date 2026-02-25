@@ -2,7 +2,7 @@
   import { writeNode } from './api.js';
 
   let { update, onAccepted = () => {}, onDismissed = () => {} } = $props();
-  let status = $state('pending');
+  let status = $state(update._alreadyInVault ? 'accepted' : 'pending');
 
   const TYPE_FOLDER_MAP = {
     goal: 'Goals', fear: 'Fears', person: 'People', book: 'Books',

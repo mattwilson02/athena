@@ -1,11 +1,14 @@
 <script>
-  import { sendMessage, resetChat } from './api.js';
+  import { sendMessage, getSession, getGraph } from './api.js';
   import GraphUpdateCard from './GraphUpdateCard.svelte';
+
+  let { sessionId = null, onSessionUpdate = () => {} } = $props();
 
   let messages = $state([]);
   let inputText = $state('');
   let isLoading = $state(false);
   let messagesContainer = $state(null);
+  let loadedSessionId = $state(null);
 
   const starterPrompts = [
     "What's blocking my biggest goals?",
@@ -20,14 +23,42 @@
     }
   }
 
+  // Load session messages when sessionId changes
   $effect(() => {
-    // Scroll when messages change
+    if (!sessionId || sessionId === loadedSessionId) return;
+    loadedSessionId = sessionId;
+    Promise.all([
+      getSession(sessionId),
+      getGraph().catch(() => ({ nodes: [] })),
+    ]).then(([session, graphData]) => {
+      const existingNodeIds = new Set(graphData.nodes.map(n => n.id));
+      messages = (session.messages || []).map(m => ({
+        role: m.role,
+        content: m.role === 'assistant' ? stripGraphUpdates(m.content) : m.content,
+        graphUpdates: (m.graph_updates || []).map(u => ({
+          ...u,
+          _alreadyInVault: u.node_id ? existingNodeIds.has(u.node_id) : false,
+        })),
+        relevantNodes: m.relevant_nodes || [],
+      }));
+      setTimeout(scrollToBottom, 50);
+    }).catch(() => {
+      messages = [];
+    });
+  });
+
+  // Scroll when messages change
+  $effect(() => {
     messages;
     setTimeout(scrollToBottom, 50);
   });
 
+  function stripGraphUpdates(text) {
+    return text.replace(/<graph_updates>[\s\S]*?<\/graph_updates>/g, '').trim();
+  }
+
   async function send(text) {
-    if (!text.trim() || isLoading) return;
+    if (!text.trim() || isLoading || !sessionId) return;
 
     const userMsg = { role: 'user', content: text };
     messages = [...messages, userMsg];
@@ -35,13 +66,14 @@
     isLoading = true;
 
     try {
-      const result = await sendMessage(text);
+      const result = await sendMessage(sessionId, text);
       messages = [...messages, {
         role: 'assistant',
         content: result.response,
         graphUpdates: result.graph_updates || [],
         relevantNodes: result.relevant_nodes || [],
       }];
+      onSessionUpdate();
     } catch (err) {
       messages = [...messages, {
         role: 'assistant',
@@ -59,19 +91,9 @@
       send(inputText);
     }
   }
-
-  async function newSession() {
-    await resetChat();
-    messages = [];
-  }
 </script>
 
 <div class="chat-view">
-  <header class="chat-header">
-    <h2>Counsel</h2>
-    <button class="btn-new-session" onclick={newSession}>New Session</button>
-  </header>
-
   <div class="messages" bind:this={messagesContainer}>
     {#if messages.length === 0 && !isLoading}
       <div class="empty-state">
@@ -138,30 +160,6 @@
     flex-direction: column;
     height: 100%;
   }
-
-  .chat-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .chat-header h2 {
-    font-size: 16px;
-    font-weight: 600;
-  }
-
-  .btn-new-session {
-    padding: 6px 14px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 12px;
-  }
-
-  .btn-new-session:hover { background: var(--bg-surface); }
 
   .messages {
     flex: 1;

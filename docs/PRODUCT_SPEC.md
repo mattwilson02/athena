@@ -343,7 +343,58 @@ The existing `POST /api/chat/reset` is **removed** — replaced by creating a ne
 
 ---
 
-## 11. Future Considerations (Post-MVP)
+## 11. Enhanced Person Nodes
+
+### 11.1 Problem
+
+The current `person` type only has `relationship` (mentor/friend/family/colleague) and `frequency`. This doesn't capture the richness of how people connect to your life — shared context, how you met, what they're working on, trust level, etc.
+
+### 11.2 Updated Frontmatter
+
+```yaml
+### Person
+relationship: mentor       # mentor | friend | family | colleague | acquaintance | partner
+frequency: weekly          # daily | weekly | monthly | rare | inactive
+met_through:               # Optional. How you met — e.g. "Fast Bitcoins", "university", "conference"
+company:                   # Optional. Where they work / what they do.
+location:                  # Optional. City or region.
+```
+
+Keep it minimal — no phone numbers, emails, or social links. This is a knowledge graph about *how people connect to your life*, not a contact book.
+
+### 11.3 Template Sections
+
+The person template body should support richer context through section headings:
+
+```markdown
+# {title}
+
+<!-- Who is this person? What's their role in your life? -->
+
+## Context
+<!-- How you met, shared history, what you've done together -->
+
+## Related
+<!-- [[node-id]] — goals, experiences, skills, interests they connect to -->
+
+## People
+<!-- [[other-person]] — mutual connections, who introduced you -->
+```
+
+### 11.4 Changes Required
+
+- **Schema** (`vault/_meta/schema.md`): Update Person frontmatter — add `met_through`, `company`, `location`. Expand `relationship` enum with `acquaintance` and `partner`.
+- **Template** (`vault/_templates/person.md`): Add `Context` section and new frontmatter fields.
+- **Frontend** (`GraphUpdateCard.svelte`, `NodeDetail.svelte`): Already handle person type — no changes needed since frontmatter renders dynamically.
+- **Mentor system prompt**: No changes needed — the AI already sees all frontmatter and content in context.
+
+### 11.5 Migration
+
+Existing person nodes are unaffected. New fields are all optional. The parser already handles missing frontmatter fields gracefully.
+
+---
+
+## 12. Future Considerations (Post-MVP)
 
 - Better embedding model
 - Neo4j if vault exceeds 10,000+ nodes

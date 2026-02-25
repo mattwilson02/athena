@@ -1,7 +1,15 @@
 <script>
-  import { getGraphStats } from './api.js';
+  import { getGraphStats, deleteSession } from './api.js';
 
-  let { currentView = 'chat', onViewChange = () => {} } = $props();
+  let {
+    currentView = 'chat',
+    onViewChange = () => {},
+    sessions = [],
+    currentSessionId = null,
+    onSessionSelect = () => {},
+    onNewSession = () => {},
+  } = $props();
+
   let stats = $state(null);
 
   const TYPE_COLORS = {
@@ -13,6 +21,17 @@
   $effect(() => {
     getGraphStats().then(s => stats = s).catch(() => {});
   });
+
+  function timeAgo(dateStr) {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'now';
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `${days}d`;
+  }
 </script>
 
 <aside class="sidebar">
@@ -28,6 +47,27 @@
       Graph
     </button>
   </nav>
+
+  {#if currentView === 'chat'}
+    <div class="sessions-section">
+      <div class="sessions-header">
+        <h4>Sessions</h4>
+        <button class="btn-new" onclick={onNewSession}>+</button>
+      </div>
+      <div class="session-list">
+        {#each sessions as session}
+          <button
+            class="session-item"
+            class:active={session.id === currentSessionId}
+            onclick={() => onSessionSelect(session.id)}
+          >
+            <span class="session-title">{session.title}</span>
+            <span class="session-time">{timeAgo(session.updated)}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   {#if stats}
     <div class="stats">
@@ -61,7 +101,8 @@
     display: flex;
     flex-direction: column;
     padding: 20px 16px;
-    gap: 24px;
+    gap: 16px;
+    overflow-y: auto;
   }
 
   .logo h1 {
@@ -93,6 +134,92 @@
   .view-toggle button.active {
     background: var(--accent);
     color: white;
+  }
+
+  .sessions-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .sessions-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .sessions-header h4 {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+  }
+
+  .btn-new {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+  }
+
+  .btn-new:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+
+  .session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+  }
+
+  .session-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    text-align: left;
+    width: 100%;
+    transition: background 0.1s;
+  }
+
+  .session-item:hover {
+    background: var(--bg-surface);
+  }
+
+  .session-item.active {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+
+  .session-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  .session-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
   }
 
   .stats {

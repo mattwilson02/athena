@@ -13,7 +13,7 @@ from vector_search import VectorIndex
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are Athena, a personal AI mentor. You have deep knowledge of the user's \
-goals, fears, habits, values, beliefs, relationships, and experiences through their knowledge graph.
+life through their knowledge graph.
 
 CONTEXT FROM KNOWLEDGE GRAPH:
 {context}
@@ -27,13 +27,33 @@ INSTRUCTIONS:
 - When you identify new knowledge that should be added to the graph, include it in a \
 <graph_updates> block at the end of your response.
 
-GRAPH UPDATE FORMAT (only when you have genuine new insights to propose):
+NODE TYPE RULES — use the right type for each piece of information:
+- person: A specific individual. Use for anyone the user names — friends, mentors, family, \
+colleagues. The title should be their name. Include relationship, met_through, company, location \
+in frontmatter fields where known.
+- goal: Something the user is actively working toward or wants to achieve.
+- fear: Something holding the user back or causing anxiety.
+- belief: A core conviction or mental model the user holds.
+- value: Something the user cares deeply about — a principle they live by.
+- skill: A competency the user has or is building.
+- habit: A recurring behavior — good or bad.
+- book: A book the user has read or is reading.
+- interest: A topic, hobby, or curiosity.
+- experience: A specific past event or life chapter. Use ONLY for things that happened, not for \
+ongoing relationships (use person), recurring patterns (use habit), or current pursuits (use goal).
+- daily: A journal entry for a specific day.
+
+CRITICAL: Do NOT dump everything into "experience." If someone is mentioned, create a "person" \
+node. If an activity is ongoing, it's a "habit" or "interest," not an experience. "Experience" is \
+for discrete past events only — "studied abroad in 2019", "got laid off in March", etc.
+
+GRAPH UPDATE FORMAT:
 <graph_updates>
 [
   {{
     "action": "create",
     "node_id": "suggested-slug-id",
-    "type": "goal|fear|belief|habit|skill|value|interest|experience",
+    "type": "person|goal|fear|belief|value|skill|habit|book|interest|experience|daily",
     "title": "Human Readable Title",
     "content": "Description of the node.",
     "tags": ["tag1", "tag2"],
@@ -50,21 +70,21 @@ GRAPH UPDATE FORMAT (only when you have genuine new insights to propose):
 ]
 </graph_updates>
 
-Do NOT include <graph_updates> unless you have a genuine new insight to propose. \
-Only propose nodes/links that add real value to the user's self-understanding."""
+Propose graph updates when the user shares information worth capturing. Err on the side of \
+proposing — the user can always dismiss. But choose the RIGHT type for each node."""
 
 GRAPH_UPDATES_RE = re.compile(r"<graph_updates>\s*(.*?)\s*</graph_updates>", re.DOTALL)
 
 
 class MentorAgent:
-    """Claude-powered mentor with hybrid retrieval and conversation memory."""
+    """Claude-powered mentor with hybrid retrieval. Stateless — conversation
+    history is passed in from the chat store."""
 
     def __init__(self, graph: VaultGraph, vector_index: VectorIndex) -> None:
         self.graph = graph
         self.vector_index = vector_index
         self.client = anthropic.Anthropic()
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-        self.conversation: list[dict] = []
 
     def get_context(self, query: str) -> tuple[str, list[dict]]:
         """Hybrid retrieval: semantic search + graph traversal.
@@ -108,44 +128,40 @@ class MentorAgent:
         context = "\n".join(context_parts) if context_parts else "(No relevant nodes found in knowledge graph)"
         return context, search_results
 
-    def chat(self, message: str) -> dict:
-        """Send a message, get a response with graph update proposals."""
-        context, search_results = self.get_context(message)
+    def chat(self, message: str, conversation_history: list[dict]) -> dict:
+        """Send a message with conversation history, get a response with graph update proposals.
 
+        conversation_history: list of {role, content} dicts from the chat store.
+        """
+        context, search_results = self.get_context(message)
         system = SYSTEM_PROMPT.format(context=context)
-        self.conversation.append({"role": "user", "content": message})
+
+        # Build messages: prior history + current user message
+        messages = conversation_history + [{"role": "user", "content": message}]
 
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2048,
                 system=system,
-                messages=self.conversation,
+                messages=messages,
             )
             assistant_text = response.content[0].text
         except anthropic.APIError as e:
             logger.error(f"Claude API error: {e}")
-            # Remove the user message we just added since the call failed
-            self.conversation.pop()
             raise
 
         clean_text, graph_updates = self._parse_graph_updates(assistant_text)
 
-        # Store full response (with graph_updates) in history so Claude has context
-        self.conversation.append({"role": "assistant", "content": assistant_text})
-
         return {
             "response": clean_text,
+            "full_response": assistant_text,
             "graph_updates": graph_updates,
             "relevant_nodes": [
                 {"id": r["id"], "title": r.get("title", r["id"]), "type": r.get("type", "unknown")}
                 for r in search_results
             ],
         }
-
-    def reset(self) -> None:
-        """Clear conversation history."""
-        self.conversation = []
 
     def _parse_graph_updates(self, response_text: str) -> tuple[str, list[dict]]:
         """Extract <graph_updates> block from response.

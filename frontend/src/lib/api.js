@@ -9,17 +9,35 @@ async function fetchJSON(url, options = {}) {
   return res.json();
 }
 
-export function sendMessage(message) {
+// --- Sessions ---
+
+export function listSessions() {
+  return fetchJSON(`${BASE}/chat/sessions`);
+}
+
+export function createSession() {
+  return fetchJSON(`${BASE}/chat/sessions`, { method: 'POST' });
+}
+
+export function getSession(sessionId) {
+  return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}`);
+}
+
+export function deleteSession(sessionId) {
+  return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+}
+
+// --- Chat ---
+
+export function sendMessage(sessionId, message) {
   return fetchJSON(`${BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ session_id: sessionId, message }),
   });
 }
 
-export function resetChat() {
-  return fetchJSON(`${BASE}/chat/reset`, { method: 'POST' });
-}
+// --- Graph ---
 
 export function getGraph() {
   return fetchJSON(`${BASE}/graph`);
@@ -41,6 +59,8 @@ export function searchNodes(query) {
   return fetchJSON(`${BASE}/search?q=${encodeURIComponent(query)}`);
 }
 
+// --- Vault ---
+
 export function writeNode(nodeData) {
   return fetchJSON(`${BASE}/vault/write`, {
     method: 'POST',
@@ -52,6 +72,8 @@ export function writeNode(nodeData) {
 export function rebuildVault() {
   return fetchJSON(`${BASE}/vault/rebuild`, { method: 'POST' });
 }
+
+// --- Insights ---
 
 export function getInsights() {
   return fetchJSON(`${BASE}/insights`);
