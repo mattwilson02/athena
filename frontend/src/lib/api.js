@@ -27,6 +27,14 @@ export function deleteSession(sessionId) {
   return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
 }
 
+export function dismissUpdate(sessionId, updateKey) {
+  return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ update_key: updateKey }),
+  });
+}
+
 // --- Chat ---
 
 export function sendMessage(sessionId, message) {
@@ -79,6 +87,14 @@ export function updateNode(nodeId, changes) {
 
 export function rebuildVault() {
   return fetchJSON(`${BASE}/vault/rebuild`, { method: 'POST' });
+}
+
+export function suggestLinks(nodeId = null) {
+  return fetchJSON(`${BASE}/graph/suggest-links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(nodeId ? { node_id: nodeId } : {}),
+  });
 }
 
 // --- Schema ---

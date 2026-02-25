@@ -1,5 +1,7 @@
 """Parses vault markdown files into structured nodes and edges."""
 
+from __future__ import annotations
+
 import os
 import re
 import logging
@@ -24,7 +26,7 @@ DEFAULT_EDGE_MAP = {
     "met at": "met_at",
 }
 
-SKIP_DIRS = {"_meta", "_templates", ".git"}
+SKIP_DIRS = {"_meta", "_templates", "_backup", ".git"}
 
 
 class VaultParser:

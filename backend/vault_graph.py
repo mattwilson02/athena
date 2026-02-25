@@ -1,5 +1,7 @@
 """In-memory directed graph wrapping NetworkX DiGraph."""
 
+from __future__ import annotations
+
 import logging
 from collections import Counter
 
@@ -90,6 +92,33 @@ class VaultGraph:
                 "type": data.get("type", "relates_to"),
             })
         return results
+
+    def get_degree(self, node_id: str) -> int:
+        """Return total degree (in + out) for a node."""
+        if node_id not in self.graph:
+            return 0
+        return self.graph.in_degree(node_id) + self.graph.out_degree(node_id)
+
+    def get_neighbors_by_hop(self, node_id: str, depth: int = 2) -> dict[int, list[dict]]:
+        """Return neighbors grouped by hop distance.
+
+        Returns {1: [nodes at 1-hop], 2: [nodes at 2-hop], ...}.
+        """
+        if node_id not in self.graph:
+            return {}
+
+        undirected = self.graph.to_undirected()
+        distances = nx.single_source_shortest_path_length(undirected, node_id, cutoff=depth)
+
+        by_hop: dict[int, list[dict]] = {}
+        for nid, dist in distances.items():
+            if nid == node_id or dist == 0:
+                continue
+            data = dict(self.graph.nodes[nid])
+            data["id"] = nid
+            by_hop.setdefault(dist, []).append(data)
+
+        return by_hop
 
     def get_stats(self) -> dict:
         """Return graph statistics."""

@@ -1,5 +1,7 @@
 """Semantic search over vault nodes using ChromaDB."""
 
+from __future__ import annotations
+
 import logging
 
 import chromadb

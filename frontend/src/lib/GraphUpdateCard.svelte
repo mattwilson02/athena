@@ -1,28 +1,11 @@
 <script>
-  import { writeNode, updateNode } from './api.js';
+  import { writeNode, updateNode, dismissUpdate } from './api.js';
+  import { getTypeColor } from './colors.js';
 
-  let { update, onAccepted = () => {}, onDismissed = () => {} } = $props();
-  let status = $state(update._alreadyInVault ? 'accepted' : 'pending');
-
-  // Domain-based colour families
-  const TYPE_COLORS = {
-    // Self
-    goal: '#4ade80', fear: '#f87171', belief: '#fb923c', value: '#f472b6',
-    habit: '#34d399', skill: '#a78bfa',
-    // People
-    person: '#60a5fa', organisation: '#3b82f6',
-    // Knowledge
-    book: '#fbbf24', article: '#f59e0b', idea: '#eab308', note: '#a3a3a3',
-    interest: '#22d3ee',
-    // Life
-    experience: '#e879f9', daily: '#94a3b8', memory: '#c084fc',
-    // Planning
-    task: '#38bdf8', project: '#0ea5e9', reminder: '#7dd3fc', event: '#06b6d4',
-    // Places
-    place: '#fb7185',
-    // Finance
-    expense: '#f97316', subscription: '#ea580c', budget: '#c2410c',
-  };
+  let { update, sessionId = null, onAccepted = () => {}, onDismissed = () => {} } = $props();
+  let status = $state(update._dismissed ? 'dismissed' : update._alreadyInVault ? 'accepted' : 'pending');
+  let errorMsg = $state('');
+  let suggestedLinks = $state([]);
 
   const ACTION_LABELS = {
     create: 'New',
@@ -39,7 +22,7 @@
   function badgeColor() {
     if (update.action === 'link') return '#64748b';
     if (update.action === 'update') return '#f59e0b';
-    return TYPE_COLORS[update.type] || '#888';
+    return getTypeColor(update.type);
   }
 
   function cardTitle() {
@@ -92,6 +75,7 @@
       onAccepted();
     } catch (e) {
       console.error('GraphUpdateCard accept error:', e);
+      errorMsg = e.message || 'Failed to write';
       status = 'error';
     }
   }
@@ -107,13 +91,22 @@
       tags: update.tags || [],
       ...(update.frontmatter || {}),
     };
-    await writeNode({
+    const result = await writeNode({
       node_id: update.node_id,
       title: update.title,
       type: update.type,
       content: update.content || '',
       frontmatter: fm,
+      edges: update.edges || [],
     });
+
+    // Surface any cross-reference suggestions
+    if (result.suggested_links?.length) {
+      suggestedLinks = result.suggested_links.map(link => ({
+        ...link,
+        _status: 'pending',
+      }));
+    }
   }
 
   async function acceptUpdate() {
@@ -121,14 +114,33 @@
   }
 
   async function acceptLink() {
-    // Add the edge to the source node
     await updateNode(update.source, {
       add_edges: [{ target: update.target, type: update.type || 'relates_to' }],
     });
   }
 
+  async function acceptSuggestedLink(link) {
+    link._status = 'writing';
+    suggestedLinks = [...suggestedLinks];
+    try {
+      await updateNode(link.source, {
+        add_edges: [{ target: link.target, type: link.type || 'relates_to' }],
+      });
+      link._status = 'accepted';
+      suggestedLinks = [...suggestedLinks];
+    } catch (e) {
+      console.error('Suggested link accept error:', e);
+      link._status = 'error';
+      suggestedLinks = [...suggestedLinks];
+    }
+  }
+
+  function dismissSuggestedLink(link) {
+    link._status = 'dismissed';
+    suggestedLinks = [...suggestedLinks];
+  }
+
   async function mergeIntoExisting() {
-    // Convert create into an update on the existing node
     status = 'writing';
     try {
       const existingId = update._duplicate.existing_id;
@@ -156,6 +168,11 @@
 
   function dismiss() {
     status = 'dismissed';
+    // Persist dismiss so it survives reload
+    const key = update.node_id || update.source || `${update.action}-${update.title}`;
+    if (sessionId && key) {
+      dismissUpdate(sessionId, key).catch(() => {});
+    }
     onDismissed();
   }
 </script>
@@ -196,9 +213,34 @@
         {update.action === 'update' ? 'Node updated' : update.action === 'link' ? 'Linked' : 'Added to vault'}
       </div>
     {:else if status === 'error'}
-      <div class="card-status error-text">Failed to write</div>
+      <div class="card-status error-text">{errorMsg || 'Failed to write'}</div>
     {/if}
   </div>
+
+  {#if suggestedLinks.length > 0}
+    <div class="suggested-links">
+      <div class="suggested-header">Suggested links</div>
+      {#each suggestedLinks as link}
+        {#if link._status !== 'dismissed'}
+          <div class="link-suggestion" class:accepted={link._status === 'accepted'}>
+            <span class="link-arrow">{link.source} → {link.target}</span>
+            <span class="link-type">{link.type}</span>
+            <span class="link-reason">{link.reason}</span>
+            {#if link._status === 'pending'}
+              <button class="btn-link-accept" onclick={() => acceptSuggestedLink(link)}>Link</button>
+              <button class="btn-link-dismiss" onclick={() => dismissSuggestedLink(link)}>Skip</button>
+            {:else if link._status === 'writing'}
+              <span class="link-status">Linking...</span>
+            {:else if link._status === 'accepted'}
+              <span class="link-status accepted-text">Linked</span>
+            {:else if link._status === 'error'}
+              <span class="link-status error-text">Failed</span>
+            {/if}
+          </div>
+        {/if}
+      {/each}
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -322,4 +364,84 @@
 
   .accepted-text { color: #4ade80; }
   .error-text { color: #f87171; }
+
+  /* Suggested links */
+  .suggested-links {
+    margin-top: 6px;
+    padding: 8px;
+    background: var(--bg-surface);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+  }
+
+  .suggested-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+
+  .link-suggestion {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 12px;
+    flex-wrap: wrap;
+  }
+
+  .link-suggestion.accepted {
+    opacity: 0.6;
+  }
+
+  .link-arrow {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .link-type {
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: #64748b30;
+    color: #94a3b8;
+    font-size: 10px;
+  }
+
+  .link-reason {
+    color: var(--text-muted);
+    font-size: 11px;
+    flex: 1;
+  }
+
+  .link-status {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .btn-link-accept {
+    padding: 2px 10px;
+    border: none;
+    border-radius: 4px;
+    background: #4ade80;
+    color: #0f0f1a;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btn-link-accept:hover { background: #22c55e; }
+
+  .btn-link-dismiss {
+    padding: 2px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .btn-link-dismiss:hover { background: var(--bg-surface-hover); }
 </style>

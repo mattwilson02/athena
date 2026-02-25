@@ -1,7 +1,9 @@
-# Athena — Complete Product Specification
+# Athena — V1 Product Specification
+
+> **Note:** This is the V1 spec. Athena V2 is now the current version — see [V2_SPEC.md](V2_SPEC.md) for the active spec.
 
 > A self-hosted personal AI mentor built on an Obsidian-compatible knowledge graph.
-> This document is the single source of truth for Claude Code to build from.
+> V2 expanded this into a personal management system with 7 domains, 24 types, schema-driven architecture, and the Athena personality (goddess of wisdom and strategy).
 
 ---
 

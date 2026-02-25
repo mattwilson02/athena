@@ -1,5 +1,8 @@
 """Flask API entry point for Athena."""
 
+from __future__ import annotations
+
+import json
 import os
 import re
 import logging
@@ -14,7 +17,7 @@ from schema_parser import parse_schema, get_folder_for_type, get_edge_map
 from vault_parser import VaultParser
 from vault_graph import VaultGraph
 from vector_search import VectorIndex
-from mentor_agent import MentorAgent
+from mentor_agent import MentorAgent, load_insights_prompt
 from chat_store import ChatStore
 
 load_dotenv()
@@ -58,7 +61,7 @@ rebuild_all()
 # Mentor agent (only initialized if API key is set)
 mentor: MentorAgent | None = None
 if os.getenv("ANTHROPIC_API_KEY"):
-    mentor = MentorAgent(graph, vector_index, schema)
+    mentor = MentorAgent(graph, vector_index, schema, vault_path=vault_path)
     logger.info("Mentor agent ready")
 else:
     logger.warning("ANTHROPIC_API_KEY not set — chat and insights endpoints disabled")
@@ -93,6 +96,18 @@ def get_session(session_id: str):
 def delete_session(session_id: str):
     """Delete a chat session."""
     if not chat_store.delete_session(session_id):
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/chat/sessions/<session_id>/dismiss", methods=["POST"])
+def dismiss_update(session_id: str):
+    """Persist a dismissed graph update so it stays dismissed on reload."""
+    data = request.json or {}
+    update_key = data.get("update_key")
+    if not update_key:
+        return jsonify({"error": "update_key is required"}), 400
+    if not chat_store.dismiss_update(session_id, update_key):
         return jsonify({"error": "Session not found"}), 404
     return jsonify({"ok": True})
 
@@ -181,9 +196,17 @@ def chat():
     try:
         result = mentor.chat(message, history)
     except anthropic.AuthenticationError:
-        return jsonify({"error": "Invalid ANTHROPIC_API_KEY"}), 401
+        return jsonify({"error": "Invalid API key. Check your ANTHROPIC_API_KEY."}), 401
+    except anthropic.RateLimitError:
+        return jsonify({"error": "Rate limited. Slow down and try again shortly."}), 429
+    except anthropic.APIStatusError as e:
+        if e.status_code == 529:
+            return jsonify({"error": "Claude is overloaded right now. Try again in a few seconds."}), 529
+        logger.error(f"Claude API error: {e}")
+        return jsonify({"error": "Something went wrong talking to Claude. Try again."}), 502
     except anthropic.APIError as e:
-        return jsonify({"error": f"Claude API error: {e}"}), 502
+        logger.error(f"Claude API error: {e}")
+        return jsonify({"error": "Something went wrong talking to Claude. Try again."}), 502
 
     # Post-process: dedup check on create proposals
     graph_updates = _dedup_check(result["graph_updates"])
@@ -232,13 +255,7 @@ def insights():
         response = client.messages.create(
             model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             max_tokens=1024,
-            system=(
-                "You are Athena, analyzing a personal knowledge graph. "
-                "Identify 3-5 actionable observations: blocked goals, "
-                "contradictions between beliefs and actions, unsupported goals, "
-                "patterns, or blind spots. Be specific and reference nodes by name. "
-                "Be concise."
-            ),
+            system=load_insights_prompt(vault_path),
             messages=[{"role": "user", "content": f"Here is my knowledge graph:\n{graph_summary}"}],
         )
         return jsonify({"insights": response.content[0].text})
@@ -332,9 +349,19 @@ def vault_write():
     if not node_id:
         return jsonify({"error": "node_id is required"}), 400
 
-    # Sanitize node_id — only allow lowercase alphanumeric and hyphens
-    if not re.match(r"^[a-z0-9-]+$", node_id):
-        return jsonify({"error": "node_id must be lowercase alphanumeric with hyphens"}), 400
+    # Sanitize node_id — normalize to lowercase alphanumeric with hyphens
+    node_id = node_id.lower().replace("_", "-").replace(" ", "-")
+    node_id = re.sub(r"[^a-z0-9-]", "", node_id)
+    node_id = re.sub(r"-+", "-", node_id).strip("-")
+    if not node_id:
+        return jsonify({"error": "node_id is empty after sanitization"}), 400
+
+    # Validate type against schema
+    valid_types = set(schema.get("type_list", []))
+    if node_type and node_type not in valid_types:
+        # Try to find closest valid type before rejecting
+        logger.warning(f"Invalid node type '{node_type}' for node '{node_id}' — rejecting")
+        return jsonify({"error": f"Invalid type '{node_type}'. Valid types: {', '.join(sorted(valid_types))}"}), 400
 
     # Resolve folder from schema (falls back to client-provided folder)
     folder = get_folder_for_type(schema, node_type) or data.get("folder")
@@ -345,14 +372,37 @@ def vault_write():
     if ".." in folder or folder.startswith("/"):
         return jsonify({"error": "Invalid folder path"}), 400
 
-    # Ensure frontmatter has core fields
-    frontmatter.setdefault("id", node_id)
+    # Ensure frontmatter has core fields (use sanitized node_id)
+    frontmatter["id"] = node_id
     frontmatter.setdefault("type", node_type)
     frontmatter.setdefault("title", title)
 
     # Build markdown
     fm_str = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
-    md = f"---\n{fm_str}---\n\n# {title}\n\n{content}\n"
+    body = f"# {title}\n\n{content}\n"
+
+    # Write edges as wikilinks under section headings
+    edges = data.get("edges", [])
+    if edges:
+        # Group edges by section
+        sections: dict[str, list[str]] = {}
+        for edge in edges:
+            target = edge.get("target", "")
+            edge_type = edge.get("type", "relates_to")
+            if target:
+                # Sanitize target ID the same way
+                target = target.lower().replace("_", "-").replace(" ", "-")
+                target = re.sub(r"[^a-z0-9-]", "", target)
+                target = re.sub(r"-+", "-", target).strip("-")
+                section = _edge_type_to_section(edge_type)
+                sections.setdefault(section, []).append(target)
+
+        for section_name, targets in sections.items():
+            body += f"\n## {section_name}\n"
+            for t in targets:
+                body += f"- [[{t}]]\n"
+
+    md = f"---\n{fm_str}---\n\n{body}"
 
     # Write file
     filepath = os.path.join(vault_path, folder, f"{node_id}.md")
@@ -361,7 +411,16 @@ def vault_write():
         f.write(md)
 
     stats = rebuild_all()
-    return jsonify({"ok": True, "filepath": f"{folder}/{node_id}.md", "stats": stats})
+
+    # Cross-reference: find suggested links for the new node
+    suggested_links = _find_cross_references(node_id)
+
+    return jsonify({
+        "ok": True,
+        "filepath": f"{folder}/{node_id}.md",
+        "stats": stats,
+        "suggested_links": suggested_links,
+    })
 
 
 @app.route("/api/vault/update", methods=["POST"])
@@ -374,6 +433,11 @@ def vault_update():
     node_id = data.get("node_id")
     if not node_id:
         return jsonify({"error": "node_id is required"}), 400
+
+    # Sanitize node_id the same way as vault/write
+    node_id = node_id.lower().replace("_", "-").replace(" ", "-")
+    node_id = re.sub(r"[^a-z0-9-]", "", node_id)
+    node_id = re.sub(r"-+", "-", node_id).strip("-")
 
     # Find the existing node to get its filepath
     node = graph.get_node(node_id)
@@ -390,6 +454,27 @@ def vault_update():
 
     fm, body = _split_frontmatter(raw)
     changes = data.get("changes", {})
+
+    # Replace title if provided
+    new_title = changes.get("title")
+    if new_title:
+        fm["title"] = new_title
+        # Update the # heading in body
+        body = re.sub(r"^# .+", f"# {new_title}", body, count=1)
+
+    # Replace content if provided (replaces body text, keeps section headings with wikilinks)
+    new_content = changes.get("content")
+    if new_content:
+        # Preserve edge sections (## headings with wikilinks) but replace everything before them
+        section_match = re.search(r"\n## ", body)
+        if section_match:
+            heading_match = re.match(r"# .+\n", body)
+            heading = heading_match.group(0) if heading_match else f"# {fm.get('title', node_id)}\n"
+            body = heading + "\n" + new_content + "\n" + body[section_match.start():]
+        else:
+            heading_match = re.match(r"# .+\n", body)
+            heading = heading_match.group(0) if heading_match else f"# {fm.get('title', node_id)}\n"
+            body = heading + "\n" + new_content + "\n"
 
     # Patch frontmatter
     fm_updates = changes.get("frontmatter", {})
@@ -431,6 +516,10 @@ def vault_update():
         target = edge.get("target", "")
         edge_type = edge.get("type", "relates_to")
         if target:
+            # Sanitize target ID
+            target = target.lower().replace("_", "-").replace(" ", "-")
+            target = re.sub(r"[^a-z0-9-]", "", target)
+            target = re.sub(r"-+", "-", target).strip("-")
             section = _edge_type_to_section(edge_type)
             body = _add_wikilink_to_section(body, section, target)
 
@@ -506,6 +595,177 @@ def vault_rebuild():
     return jsonify({"ok": True, "stats": stats})
 
 
+# --- Smart Linking ---
+
+
+def _find_cross_references(node_id: str, max_suggestions: int = 5) -> list[dict]:
+    """Find potential links for a node by scanning existing nodes.
+
+    Three strategies:
+    1. Reverse scan — existing nodes whose content mentions this node's title
+    2. Forward scan — this node's content mentions existing node titles
+    3. Semantic similarity — related nodes not yet linked
+
+    Returns [{source, target, type, reason}].
+    """
+    node = graph.get_node(node_id)
+    if node is None:
+        return []
+
+    title = node.get("title", "")
+    node_type = node.get("type", "")
+    content = node.get("content", "")
+    existing_neighbors = {n["id"] for n in graph.get_neighbors(node_id, depth=1)}
+    suggestions: list[dict] = []
+    seen_targets: set[str] = set()
+
+    all_nodes = graph.get_all_nodes()
+
+    # 1. Reverse scan: existing nodes that mention this node
+    if title:
+        title_lower = title.lower()
+        for other in all_nodes:
+            if other["id"] == node_id or other["id"] in existing_neighbors:
+                continue
+            other_content = other.get("content", "")
+            other_title = other.get("title", "")
+            if title_lower in other_content.lower() or title_lower in other_title.lower():
+                if other["id"] not in seen_targets:
+                    suggestions.append({
+                        "source": other["id"],
+                        "target": node_id,
+                        "type": _infer_edge_type(other.get("type", ""), node_type),
+                        "reason": f'"{other.get("title", other["id"])}" mentions "{title}"',
+                    })
+                    seen_targets.add(other["id"])
+
+    # 2. Forward scan: this node mentions existing node titles
+    if content:
+        content_lower = content.lower()
+        for other in all_nodes:
+            if other["id"] == node_id or other["id"] in existing_neighbors:
+                continue
+            if other["id"] in seen_targets:
+                continue
+            other_title = other.get("title", "")
+            if other_title and len(other_title) > 2 and other_title.lower() in content_lower:
+                suggestions.append({
+                    "source": node_id,
+                    "target": other["id"],
+                    "type": _infer_edge_type(node_type, other.get("type", "")),
+                    "reason": f'Content mentions "{other_title}"',
+                })
+                seen_targets.add(other["id"])
+
+    # 3. Semantic similarity
+    try:
+        search_text = f"{title} {content[:200]}" if content else title
+        similar = vector_index.search(search_text, n=8)
+        for result in similar:
+            rid = result["id"]
+            if rid == node_id or rid in existing_neighbors or rid in seen_targets:
+                continue
+            if result.get("score", 999) > 0.8:
+                continue
+            suggestions.append({
+                "source": node_id,
+                "target": rid,
+                "type": _infer_edge_type(node_type, result.get("type", "")),
+                "reason": f'Semantically related to "{result.get("title", rid)}"',
+            })
+            seen_targets.add(rid)
+    except Exception as e:
+        logger.warning(f"Semantic search failed during cross-ref: {e}")
+
+    return suggestions[:max_suggestions]
+
+
+def _infer_edge_type(source_type: str, target_type: str) -> str:
+    """Infer a sensible default edge type from source and target node types."""
+    if target_type == "person" or source_type == "person":
+        return "involves"
+    if target_type == "place" or source_type == "place":
+        return "located_in"
+    if target_type == "project" or source_type == "project":
+        return "part_of"
+    if target_type == "budget" or source_type == "budget":
+        return "funded_by"
+    if target_type == "book" or target_type == "article":
+        return "inspired_by"
+    return "relates_to"
+
+
+@app.route("/api/graph/suggest-links", methods=["POST"])
+def suggest_links():
+    """Suggest missing edges — for a specific node or the full graph.
+
+    Body: {"node_id": "optional-id"}
+    If node_id given: fast heuristic scan.
+    If omitted: AI analyses the full graph (requires API key).
+    """
+    data = request.json or {}
+    node_id = data.get("node_id")
+
+    if node_id:
+        suggestions = _find_cross_references(node_id)
+        return jsonify({"suggestions": suggestions})
+
+    # Full graph AI analysis
+    if mentor is None:
+        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 503
+
+    stats = graph.get_stats()
+    if stats["total_nodes"] < 2:
+        return jsonify({"suggestions": []})
+
+    all_nodes = graph.get_all_nodes()
+    all_edges = graph.get_all_edges()
+
+    node_lines = []
+    for n in all_nodes:
+        degree = graph.get_degree(n["id"])
+        node_lines.append(
+            f'- {n["id"]} ({n.get("type", "?")}) "{n.get("title", "")}" [degree={degree}]'
+        )
+
+    edge_lines = [f'- {e["source"]} --{e["type"]}--> {e["target"]}' for e in all_edges]
+
+    prompt = (
+        f"Nodes ({len(all_nodes)}):\n" + "\n".join(node_lines)
+        + f"\n\nEdges ({len(all_edges)}):\n"
+        + ("\n".join(edge_lines) if edge_lines else "(none)")
+        + "\n\nSuggest up to 10 missing edges. Focus on: orphaned nodes (degree=0), "
+        "nodes that clearly relate but aren't linked, cross-domain connections.\n\n"
+        "Return ONLY a JSON array:\n"
+        '[{"source": "node-id", "target": "node-id", "type": "edge_type", "reason": "why"}]'
+    )
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+            max_tokens=1024,
+            system="You are a graph analysis tool. Return only valid JSON arrays.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        json_match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if json_match:
+            suggestions = json.loads(json_match.group())
+            valid_ids = {n["id"] for n in all_nodes}
+            suggestions = [
+                s for s in suggestions
+                if isinstance(s, dict)
+                and s.get("source") in valid_ids
+                and s.get("target") in valid_ids
+            ]
+            return jsonify({"suggestions": suggestions})
+        return jsonify({"suggestions": []})
+    except (anthropic.APIError, json.JSONDecodeError) as e:
+        logger.error(f"suggest-links error: {e}")
+        return jsonify({"error": str(e)}), 502
+
+
 # --- Error Handlers ---
 
 
@@ -521,4 +781,4 @@ def handle_error(e):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)

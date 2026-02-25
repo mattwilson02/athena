@@ -437,24 +437,35 @@ The system prompt is assembled at runtime from components:
 
 ```
 SYSTEM_PROMPT = [
-  IDENTITY          # "You are Athena, a personal AI assistant..."
+  IDENTITY          # "You are Athena — goddess of wisdom, strategy..."
   GRAPH_CONTEXT     # Injected from hybrid retrieval (per-request)
   SCHEMA_RULES      # Generated from schema.md at boot — domains, types, when to use each
   DEDUP_RULES       # "Before creating, check if a similar node exists..."
-  UPDATE_RULES      # "Use 'update' action for existing nodes..."
-  LINKING_RULES     # "Always propose edges to related existing nodes..."
   FORMAT_SPEC       # Graph update JSON format with all action types
 ]
 ```
 
 `SCHEMA_RULES` is generated dynamically: iterate over domains and types from the parsed schema, generate a concise rule for each type. When you add a type to schema.md, the prompt updates automatically on next boot.
 
-### 9.3 Identity Shift
+### 9.3 Athena's Personality
 
-V1: "You are Athena, a personal AI **mentor**."
-V2: "You are Athena, a personal AI **assistant** that organises the user's life through a knowledge graph."
+Athena is the goddess of wisdom and strategic thinking. She sees the whole board.
 
-The mentor personality remains but the scope broadens. Athena should be equally comfortable discussing career anxiety and tracking a restaurant recommendation.
+**Identity**: Sharp, direct, strategic. Thinks in systems — when someone mentions a restaurant, she's already linking it to the trip they're planning and the friend who recommended it. When they mention a fear, she sees which goals it's blocking.
+
+**Tone rules**:
+- No filler, no preamble, no "Great question!"
+- Reference nodes by name — "Get Promoted" not "your goals"
+- Aggressive about proposing graph updates — most conversations contain at least one node
+- Calls out contradictions, blind spots, things the user seems to be avoiding
+- "A knowledge tool, not a therapist. Wisdom means telling people what they need to hear."
+
+**Consistency**: This personality should be reflected in:
+- System prompt (`_IDENTITY`, `_INSTRUCTIONS` in `mentor_agent.py`)
+- Insights endpoint system prompt (`server.py`)
+- Starter prompts and empty states (`ChatView.svelte`)
+- Input placeholder text
+- "What do I see?" insights button (`Sidebar.svelte`)
 
 ---
 
@@ -504,44 +515,47 @@ The card handles four action types:
 
 ## 12. Implementation Plan
 
-### Phase 1 — Schema & Vault Restructure
+All phases are complete.
+
+### Phase 1 — Schema & Vault Restructure [DONE]
 1. Rewrite `_meta/schema.md` with V2 domains and types
-2. Build schema parser — reads schema.md into structured dict at boot
-3. Create V2 vault directory structure
-4. Write migration script for V1 → V2 vault
-5. Create `_templates/` for all new types
+2. Build schema parser (`schema_parser.py`) — reads schema.md into structured dict at boot
+3. Create V2 vault directory structure (domain-grouped folders)
+4. V1 nodes backed up to `vault/_backup/v1/`
+5. Create `_templates/` for all 24 types
 6. Update `vault_parser.py` to use parsed schema for folder mapping
 
-### Phase 2 — Graph Actions & Dedup
-7. Add `update` and `unlink` actions to graph update format
-8. Build `find_duplicates()` on VectorIndex
+### Phase 2 — Graph Actions & Dedup [DONE]
+7. `update` and `link` actions in graph update format
+8. `find_duplicates()` on VectorIndex (semantic + ID matching)
 9. Backend post-processing: dedup check on AI proposals before returning to frontend
-10. `POST /api/vault/update` endpoint — patch existing nodes
-11. Update `POST /api/vault/write` with dedup awareness
+10. `POST /api/vault/update` endpoint — patch frontmatter, append content, add/remove tags and edges
+11. `POST /api/vault/write` with dedup awareness + suggested links
 
-### Phase 3 — System Prompt & Retrieval
-12. Build composed system prompt from schema
-13. Implement multi-hop retrieval (2-hop)
-14. Add domain-aware filtering to retrieval
-15. Add recency weighting
-16. Context window management (summarise distant nodes)
+### Phase 3 — System Prompt & Retrieval [DONE]
+12. Composed system prompt generated from parsed schema at boot
+13. 2-hop retrieval via `get_neighbors_by_hop()` on VaultGraph
+14. Domain-aware filtering via `_classify_domains()` keyword heuristics
+15. Recency weighting for time-sensitive types (90-day decay)
+16. Tiered context assembly: full → summary → one-liner, capped at ~3000 tokens
 
-### Phase 4 — Smart Linking
-17. Cross-reference on node accept (reverse link scan)
-18. `POST /api/graph/suggest-links` endpoint
-19. Expanded edge type support in parser and writer
+### Phase 4 — Smart Linking [DONE]
+17. Cross-reference on node accept: reverse scan, forward scan, semantic similarity
+18. `POST /api/graph/suggest-links` — heuristic (with node_id) or full AI analysis (without)
+19. `_infer_edge_type()` for sensible defaults based on source/target types
 
-### Phase 5 — Frontend V2
-20. Update GraphUpdateCard for all action types + dedup merge flow
-21. `GET /api/schema` endpoint + frontend schema loading
-22. Domain-based graph colouring and grouping
-23. Domain/type filters in sidebar
-24. Update diff view for node updates
+### Phase 5 — Frontend V2 [DONE]
+20. GraphUpdateCard: all action types + dedup merge flow + suggested links UI
+21. `GET /api/schema` endpoint + frontend schema loading via `App.svelte`
+22. Shared `colors.js` — domain/type colours, used everywhere (no more hardcoded maps)
+23. Domain/type clickable filters in sidebar with graph view integration
+24. NodeDetail: domain badges, schema-driven metadata display
 
-### Phase 6 — Polish
-25. End-to-end testing of all flows
-26. Edge case handling (merge conflicts, orphaned edges)
-27. Performance check with 500+ nodes
+### Phase 6 — Polish & Personality [DONE]
+25. Athena personality defined and wired through all touchpoints (see Section 9.3)
+26. Insights feature: "What do I see?" button in sidebar, fetches `GET /api/insights`
+27. Textarea auto-resize, empty state text, Python 3.9 compat (`from __future__ import annotations`)
+28. Unused CSS vars cleaned up, shared colour system consolidated
 
 ---
 

@@ -1,5 +1,7 @@
 """Persistent chat session storage as JSON files."""
 
+from __future__ import annotations
+
 import json
 import os
 import uuid
@@ -92,6 +94,17 @@ class ChatStore:
         if not os.path.exists(path):
             return False
         os.remove(path)
+        return True
+
+    def dismiss_update(self, session_id: str, update_key: str) -> bool:
+        """Mark a graph update as dismissed. Returns False if session not found."""
+        session = self._read(session_id)
+        if session is None:
+            return False
+        dismissed = session.setdefault("dismissed_updates", [])
+        if update_key not in dismissed:
+            dismissed.append(update_key)
+        self._write(session)
         return True
 
     def get_messages_for_api(self, session_id: str) -> list[dict]:

@@ -5,6 +5,8 @@ frontmatter fields, folder mappings, and edge types. This module reads
 it at boot so nothing is hardcoded in Python.
 """
 
+from __future__ import annotations
+
 import re
 import logging
 
