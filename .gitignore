@@ -1,0 +1,36 @@
+# Vault (personal data — never commit)
+vault/
+!vault/_meta/
+!vault/_templates/
+
+# Chat sessions (personal data)
+backend/chat_sessions/
+
+# Environment
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# ChromaDB
+backend/chroma_db/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Build
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
