@@ -76,6 +76,70 @@ class VectorIndex:
             })
         return output
 
+    def find_duplicates(self, node_id: str, title: str, node_type: str, n: int = 3) -> list[dict]:
+        """Search for existing nodes that might be duplicates of a proposed node.
+
+        Returns matches with similarity scores. Filters to same type for stronger matches.
+        """
+        try:
+            count = self.collection.count()
+        except Exception:
+            self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
+            count = self.collection.count()
+
+        if count == 0:
+            return []
+
+        # Check exact ID match first
+        try:
+            exact = self.collection.get(ids=[node_id])
+            if exact and exact["ids"]:
+                return [{
+                    "id": node_id,
+                    "title": exact["metadatas"][0].get("title", node_id),
+                    "type": exact["metadatas"][0].get("type", "unknown"),
+                    "score": 0.0,
+                    "match": "exact_id",
+                }]
+        except Exception:
+            pass
+
+        # Semantic search by title
+        n_query = min(n + 2, count)  # fetch a few extra, filter below
+        results = self.collection.query(query_texts=[title], n_results=n_query)
+
+        matches = []
+        for i, result_id in enumerate(results["ids"][0]):
+            if result_id == node_id:
+                continue  # skip self if somehow already indexed
+            result_type = results["metadatas"][0][i].get("type", "unknown")
+            result_title = results["metadatas"][0][i].get("title", result_id)
+            distance = results["distances"][0][i] if results["distances"] else 999
+
+            # ChromaDB uses L2 distance — lower = more similar
+            # Threshold: < 0.3 is very close, < 0.8 is related
+            if distance > 1.0:
+                continue
+
+            match_type = "none"
+            if result_type == node_type and distance < 0.3:
+                match_type = "likely"
+            elif result_type == node_type and distance < 0.6:
+                match_type = "possible"
+            elif distance < 0.3:
+                match_type = "possible"
+
+            if match_type != "none":
+                matches.append({
+                    "id": result_id,
+                    "title": result_title,
+                    "type": result_type,
+                    "score": round(distance, 3),
+                    "match": match_type,
+                })
+
+        return matches[:n]
+
     def rebuild(self, nodes: list[dict]) -> None:
         """Delete and recreate the collection, then re-index."""
         self.client.delete_collection(COLLECTION_NAME)

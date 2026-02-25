@@ -69,8 +69,22 @@ export function writeNode(nodeData) {
   });
 }
 
+export function updateNode(nodeId, changes) {
+  return fetchJSON(`${BASE}/vault/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, changes }),
+  });
+}
+
 export function rebuildVault() {
   return fetchJSON(`${BASE}/vault/rebuild`, { method: 'POST' });
+}
+
+// --- Schema ---
+
+export function getSchema() {
+  return fetchJSON(`${BASE}/schema`);
 }
 
 // --- Insights ---

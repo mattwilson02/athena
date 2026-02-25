@@ -1,4 +1,4 @@
-"""Claude-powered mentor with graph-aware context retrieval."""
+"""Claude-powered AI assistant with graph-aware context retrieval."""
 
 import json
 import os
@@ -7,59 +7,65 @@ import logging
 
 import anthropic
 
+from schema_parser import generate_type_rules
 from vault_graph import VaultGraph
 from vector_search import VectorIndex
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are Athena, a personal AI mentor. You have deep knowledge of the user's \
-life through their knowledge graph.
+# Template pieces — assembled into a full prompt at runtime using the parsed schema.
+_IDENTITY = """\
+You are Athena, a personal AI assistant that organises the user's life through a knowledge graph. \
+You are part mentor, part life admin — equally comfortable discussing career anxiety, tracking a \
+restaurant recommendation, or helping plan a trip.
 
 CONTEXT FROM KNOWLEDGE GRAPH:
-{context}
+{context}"""
 
+_INSTRUCTIONS = """\
 INSTRUCTIONS:
 - Reference specific nodes by name when relevant. Say "your goal to Get Promoted" not "your goals."
 - Think systemically — connect dots between nodes the user might not see.
-- Challenge constructively — don't just agree.
+- Challenge constructively when relevant — don't just agree.
 - Be concise but substantive. No filler.
-- If the user has read books relevant to the conversation, use frameworks from those books.
-- When you identify new knowledge that should be added to the graph, include it in a \
-<graph_updates> block at the end of your response.
+- When the user shares information worth capturing, include it in a <graph_updates> block at the \
+end of your response.
+- When a single message contains multiple pieces of information (a trip with tasks, people, places), \
+propose ALL relevant nodes and edges in one response. Identify the anchor (event/project) and link \
+satellite nodes to it."""
 
-NODE TYPE RULES — use the right type for each piece of information:
-- person: A specific individual. Use for anyone the user names — friends, mentors, family, \
-colleagues. The title should be their name. Include relationship, met_through, company, location \
-in frontmatter fields where known.
-- goal: Something the user is actively working toward or wants to achieve.
-- fear: Something holding the user back or causing anxiety.
-- belief: A core conviction or mental model the user holds.
-- value: Something the user cares deeply about — a principle they live by.
-- skill: A competency the user has or is building.
-- habit: A recurring behavior — good or bad.
-- book: A book the user has read or is reading.
-- interest: A topic, hobby, or curiosity.
-- experience: A specific past event or life chapter. Use ONLY for things that happened, not for \
-ongoing relationships (use person), recurring patterns (use habit), or current pursuits (use goal).
-- daily: A journal entry for a specific day.
+_DEDUP_RULES = """\
+DEDUPLICATION:
+- Before proposing a "create", check the CONTEXT above for existing nodes that match.
+- If a person, place, or concept already exists in the graph, use "update" or "link" instead of \
+creating a duplicate.
+- When updating an existing node, use the "update" action with its existing node_id."""
 
-CRITICAL: Do NOT dump everything into "experience." If someone is mentioned, create a "person" \
-node. If an activity is ongoing, it's a "habit" or "interest," not an experience. "Experience" is \
-for discrete past events only — "studied abroad in 2019", "got laid off in March", etc.
-
+_FORMAT_SPEC = """\
 GRAPH UPDATE FORMAT:
 <graph_updates>
 [
   {{
     "action": "create",
     "node_id": "suggested-slug-id",
-    "type": "person|goal|fear|belief|value|skill|habit|book|interest|experience|daily",
+    "type": "{type_enum}",
     "title": "Human Readable Title",
     "content": "Description of the node.",
     "tags": ["tag1", "tag2"],
+    "frontmatter": {{"status": "active", "priority": "high"}},
     "edges": [
-      {{"target": "existing-node-id", "type": "relates_to|blocked_by|supported_by|contradicts|inspired_by|involves"}}
+      {{"target": "existing-node-id", "type": "relates_to|blocked_by|supported_by|contradicts|inspired_by|involves|part_of|located_in|funded_by|met_at"}}
     ]
+  }},
+  {{
+    "action": "update",
+    "node_id": "existing-node-id",
+    "changes": {{
+      "frontmatter": {{"company": "Google"}},
+      "append_content": "New information to add.",
+      "add_tags": ["new-tag"],
+      "add_edges": [{{"target": "other-node", "type": "relates_to"}}]
+    }}
   }},
   {{
     "action": "link",
@@ -70,21 +76,39 @@ GRAPH UPDATE FORMAT:
 ]
 </graph_updates>
 
-Propose graph updates when the user shares information worth capturing. Err on the side of \
-proposing — the user can always dismiss. But choose the RIGHT type for each node."""
+Always propose edges to connect new nodes to existing ones. A node without edges is a missed \
+opportunity. Err on the side of proposing — the user can always dismiss."""
+
+
+def build_system_prompt(schema: dict) -> str:
+    """Assemble the full system prompt from template pieces and parsed schema."""
+    type_rules = generate_type_rules(schema)
+    type_enum = "|".join(schema["type_list"])
+    format_spec = _FORMAT_SPEC.replace("{type_enum}", type_enum)
+
+    return "\n\n".join([
+        _IDENTITY,
+        _INSTRUCTIONS,
+        type_rules,
+        _DEDUP_RULES,
+        format_spec,
+    ])
 
 GRAPH_UPDATES_RE = re.compile(r"<graph_updates>\s*(.*?)\s*</graph_updates>", re.DOTALL)
 
 
 class MentorAgent:
-    """Claude-powered mentor with hybrid retrieval. Stateless — conversation
+    """Claude-powered AI assistant with hybrid retrieval. Stateless — conversation
     history is passed in from the chat store."""
 
-    def __init__(self, graph: VaultGraph, vector_index: VectorIndex) -> None:
+    def __init__(self, graph: VaultGraph, vector_index: VectorIndex, schema: dict) -> None:
         self.graph = graph
         self.vector_index = vector_index
+        self.schema = schema
+        self.system_prompt_template = build_system_prompt(schema)
         self.client = anthropic.Anthropic()
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+        logger.info(f"System prompt built from schema ({len(self.system_prompt_template)} chars)")
 
     def get_context(self, query: str) -> tuple[str, list[dict]]:
         """Hybrid retrieval: semantic search + graph traversal.
@@ -134,7 +158,7 @@ class MentorAgent:
         conversation_history: list of {role, content} dicts from the chat store.
         """
         context, search_results = self.get_context(message)
-        system = SYSTEM_PROMPT.format(context=context)
+        system = self.system_prompt_template.format(context=context)
 
         # Build messages: prior history + current user message
         messages = conversation_history + [{"role": "user", "content": message}]
@@ -142,7 +166,7 @@ class MentorAgent:
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2048,
+                max_tokens=4096,
                 system=system,
                 messages=messages,
             )

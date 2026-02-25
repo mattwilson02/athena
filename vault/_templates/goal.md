@@ -7,6 +7,7 @@ updated:
 status: active
 priority: medium
 deadline:
+progress: 0
 tags: []
 ---
 
