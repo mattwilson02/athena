@@ -1,5 +1,7 @@
 """Parses vault markdown files into structured nodes and edges."""
 
+from __future__ import annotations
+
 import os
 import re
 import logging
@@ -10,26 +12,31 @@ logger = logging.getLogger(__name__)
 # Regex to match [[wikilinks]], capturing just the ID portion
 WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
-# Maps section heading (lowercased) to edge type
-SECTION_EDGE_MAP = {
+# Default section heading → edge type mapping (used if no schema provided)
+DEFAULT_EDGE_MAP = {
     "blockers": "blocked_by",
     "supports": "supported_by",
     "related": "relates_to",
     "contradicts": "contradicts",
     "inspired by": "inspired_by",
     "people": "involves",
+    "part of": "part_of",
+    "located in": "located_in",
+    "funded by": "funded_by",
+    "met at": "met_at",
 }
 
-SKIP_DIRS = {"_meta", "_templates", ".git"}
+SKIP_DIRS = {"_meta", "_templates", "_backup", ".git"}
 
 
 class VaultParser:
     """Reads vault markdown files, extracts frontmatter, content, and wikilinks."""
 
-    def __init__(self, vault_path: str) -> None:
+    def __init__(self, vault_path: str, edge_map: dict[str, str] | None = None) -> None:
         self.vault_path = os.path.abspath(vault_path)
         if not os.path.isdir(self.vault_path):
             raise FileNotFoundError(f"Vault directory not found: {self.vault_path}")
+        self.edge_map = edge_map or DEFAULT_EDGE_MAP
 
     def parse(self) -> tuple[list[dict], list[tuple[str, str, str]]]:
         """Walk the vault and return (nodes, edges).
@@ -139,8 +146,8 @@ class VaultParser:
                     continue
 
                 # Determine edge type from current section
-                if current_section and current_section in SECTION_EDGE_MAP:
-                    edge_type = SECTION_EDGE_MAP[current_section]
+                if current_section and current_section in self.edge_map:
+                    edge_type = self.edge_map[current_section]
                 else:
                     edge_type = "relates_to"
 

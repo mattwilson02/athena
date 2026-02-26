@@ -11,10 +11,10 @@
   let loadedSessionId = $state(null);
 
   const starterPrompts = [
-    "What's blocking my biggest goals?",
-    "What patterns do you see in my life?",
-    "How do my fears connect to my goals?",
-    "What should I focus on this week?",
+    "What do you see in my graph?",
+    "What am I neglecting?",
+    "What connections am I missing?",
+    "I want to tell you about something",
   ];
 
   function scrollToBottom() {
@@ -32,13 +32,18 @@
       getGraph().catch(() => ({ nodes: [] })),
     ]).then(([session, graphData]) => {
       const existingNodeIds = new Set(graphData.nodes.map(n => n.id));
+      const dismissedSet = new Set(session.dismissed_updates || []);
       messages = (session.messages || []).map(m => ({
         role: m.role,
         content: m.role === 'assistant' ? stripGraphUpdates(m.content) : m.content,
-        graphUpdates: (m.graph_updates || []).map(u => ({
-          ...u,
-          _alreadyInVault: u.node_id ? existingNodeIds.has(u.node_id) : false,
-        })),
+        graphUpdates: (m.graph_updates || []).map(u => {
+          const key = u.node_id || u.source || `${u.action}-${u.title}`;
+          return {
+            ...u,
+            _alreadyInVault: u.node_id ? existingNodeIds.has(u.node_id) : false,
+            _dismissed: dismissedSet.has(key),
+          };
+        }),
         relevantNodes: m.relevant_nodes || [],
       }));
       setTimeout(scrollToBottom, 50);
@@ -77,8 +82,9 @@
     } catch (err) {
       messages = [...messages, {
         role: 'assistant',
-        content: `Error: ${err.message}`,
+        content: err.message || 'Something went wrong. Try again.',
         isError: true,
+        _retryText: text,
       }];
     } finally {
       isLoading = false;
@@ -91,14 +97,20 @@
       send(inputText);
     }
   }
+
+  function autoResize(e) {
+    const el = e.target;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  }
 </script>
 
 <div class="chat-view">
   <div class="messages" bind:this={messagesContainer}>
     {#if messages.length === 0 && !isLoading}
       <div class="empty-state">
-        <h3>What's on your mind?</h3>
-        <p>Ask Athena anything about your goals, fears, habits, or life direction.</p>
+        <h3>Athena</h3>
+        <p>Tell me what's going on. I'll remember everything and connect the dots.</p>
         <div class="starter-prompts">
           {#each starterPrompts as prompt}
             <button class="starter-chip" onclick={() => send(prompt)}>{prompt}</button>
@@ -113,10 +125,20 @@
           {msg.content}
         </div>
 
+        {#if msg.isError && msg._retryText}
+          <button class="retry-btn" onclick={() => {
+            const retryText = msg._retryText;
+            // Remove the error message and the user message before it
+            const idx = messages.indexOf(msg);
+            messages = messages.filter((m, i) => i !== idx && !(i === idx - 1 && m.role === 'user'));
+            send(retryText);
+          }}>Retry</button>
+        {/if}
+
         {#if msg.graphUpdates?.length > 0}
           <div class="graph-updates">
             {#each msg.graphUpdates as update}
-              <GraphUpdateCard {update} />
+              <GraphUpdateCard {update} {sessionId} />
             {/each}
           </div>
         {/if}
@@ -144,7 +166,8 @@
     <textarea
       bind:value={inputText}
       onkeydown={handleKeydown}
-      placeholder="Ask Athena..."
+      oninput={autoResize}
+      placeholder="What's on your mind?"
       rows="1"
       disabled={isLoading}
     ></textarea>
@@ -246,6 +269,24 @@
   .message.error .bubble {
     background: #f8717120;
     color: #f87171;
+  }
+
+  .retry-btn {
+    margin-top: 6px;
+    padding: 4px 14px;
+    border: 1px solid #f8717140;
+    border-radius: var(--radius);
+    background: transparent;
+    color: #f87171;
+    font-size: 12px;
+    cursor: pointer;
+    align-self: flex-start;
+    transition: all 0.15s;
+  }
+
+  .retry-btn:hover {
+    background: #f8717115;
+    border-color: #f87171;
   }
 
   .bubble.loading {

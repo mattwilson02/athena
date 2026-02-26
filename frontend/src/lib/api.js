@@ -27,6 +27,14 @@ export function deleteSession(sessionId) {
   return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
 }
 
+export function dismissUpdate(sessionId, updateKey) {
+  return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ update_key: updateKey }),
+  });
+}
+
 // --- Chat ---
 
 export function sendMessage(sessionId, message) {
@@ -69,8 +77,30 @@ export function writeNode(nodeData) {
   });
 }
 
+export function updateNode(nodeId, changes) {
+  return fetchJSON(`${BASE}/vault/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, changes }),
+  });
+}
+
 export function rebuildVault() {
   return fetchJSON(`${BASE}/vault/rebuild`, { method: 'POST' });
+}
+
+export function suggestLinks(nodeId = null) {
+  return fetchJSON(`${BASE}/graph/suggest-links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(nodeId ? { node_id: nodeId } : {}),
+  });
+}
+
+// --- Schema ---
+
+export function getSchema() {
+  return fetchJSON(`${BASE}/schema`);
 }
 
 // --- Insights ---

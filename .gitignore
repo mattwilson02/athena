@@ -18,6 +18,7 @@ venv/
 .venv/
 
 # ChromaDB
+chroma_db/
 backend/chroma_db/
 
 # Node

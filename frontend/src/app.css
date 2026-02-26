@@ -12,18 +12,6 @@
   --radius: 8px;
   --radius-lg: 12px;
 
-  /* Node type colors */
-  --color-goal: #4ade80;
-  --color-fear: #f87171;
-  --color-person: #60a5fa;
-  --color-book: #fbbf24;
-  --color-skill: #a78bfa;
-  --color-habit: #34d399;
-  --color-value: #f472b6;
-  --color-belief: #fb923c;
-  --color-interest: #22d3ee;
-  --color-experience: #e879f9;
-  --color-daily: #94a3b8;
 }
 
 * {

@@ -5,13 +5,22 @@ title:
 created:
 updated:
 relationship:
-frequency:
+frequency: monthly
+met_through:
+company:
+location:
 tags: []
 ---
 
 # {{title}}
 
-<!-- Who is this person to you? What role do they play in your life? -->
+<!-- Who is this person? What's their role in your life? -->
+
+## Context
+<!-- How you met, shared history, what you've done together. -->
 
 ## Related
-<!-- [[node-id]] — what goals, experiences, or values connect to them? -->
+<!-- [[node-id]] — goals, experiences, interests they connect to. -->
+
+## People
+<!-- [[node-id]] — mutual connections, who introduced you. -->
