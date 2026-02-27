@@ -22,6 +22,8 @@ telegram:
   max_response_length: 4096      # Telegram message character limit
   session_prefix: "tg-"          # Session ID prefix for Telegram sessions
   max_session_messages: 200      # Auto-cap to prevent runaway sessions
+  allowed_chat_ids:              # Only these Telegram users can talk to the bot
+    - 1936233108
 
 # Audit
 audit:

@@ -367,3 +367,36 @@ class TestSimpleChatRoutes:
         assert resp.status_code == 200
         assert "Saved" in resp.get_json()["response"]
         assert (tmp_vault / "Self" / "Goals" / "test-confirm.md").exists()
+
+
+class TestChatIdAllowlist:
+    """Telegram chat ID allowlist — reject unknown users."""
+
+    def test_allowed_chat_id_passes(self, app, client):
+        app.config["athena_config"] = {
+            "telegram": {"allowed_chat_ids": [1936233108]},
+        }
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1936233108",
+            "message": "Hello",
+        })
+        assert resp.status_code == 200
+
+    def test_blocked_chat_id_returns_403(self, app, client):
+        app.config["athena_config"] = {
+            "telegram": {"allowed_chat_ids": [1936233108]},
+        }
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-9999999999",
+            "message": "Hello",
+        })
+        assert resp.status_code == 403
+
+    def test_no_allowlist_allows_all(self, app, client):
+        """If allowed_chat_ids is empty or missing, all chat IDs pass."""
+        app.config["athena_config"] = {"telegram": {}}
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-9999999999",
+            "message": "Hello",
+        })
+        assert resp.status_code == 200

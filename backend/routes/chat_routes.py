@@ -87,7 +87,16 @@ def chat_simple():
         return jsonify({"error": "session_id is required"}), 400
 
     config = current_app.config.get("athena_config", {})
-    max_messages = config.get("telegram", {}).get("max_session_messages", 200)
+    tg_config = config.get("telegram", {})
+    max_messages = tg_config.get("max_session_messages", 200)
+
+    # Chat ID allowlist — reject unknown Telegram users
+    if session_id.startswith("tg-"):
+        allowed = tg_config.get("allowed_chat_ids", [])
+        if allowed:
+            chat_id = session_id[3:]  # strip "tg-" prefix
+            if int(chat_id) not in allowed:
+                return jsonify({"error": "Unauthorized chat ID"}), 403
 
     result = current_app.config["chat_service"].send_simple_message(
         session_id, data["message"], max_messages=max_messages
