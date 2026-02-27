@@ -142,7 +142,7 @@ def create_app() -> Flask:
 
     # Services
     vault_service = VaultService(vault_path, graph, vector_index, schema, rebuild_all)
-    chat_service = ChatService(chat_store, mentor, graph, vector_index)
+    chat_service = ChatService(chat_store, mentor, graph, vector_index, vault_service=vault_service)
 
     # Store on app.config for blueprint access
     app.config["vault_path"] = vault_path

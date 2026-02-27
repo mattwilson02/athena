@@ -1,0 +1,37 @@
+# n8n automation server — bridges Telegram ↔ Athena
+# Run separately: docker compose -f deployment/n8n/docker-compose.yml up -d
+#
+# n8n needs internet access (Telegram Bot API) so it runs on its own
+# bridge network plus the shared athena internal network.
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: athena-n8n
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"       # Loopback only — n8n web UI
+    environment:
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - WEBHOOK_URL=https://${N8N_DOMAIN}/
+    volumes:
+      - n8n-data:/home/node/.n8n
+    networks:
+      - n8n-net                       # Internet access (Telegram API, webhook receiving)
+      - athena-net                    # Reach athena:5001 on internal network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: 1
+
+networks:
+  n8n-net:
+    driver: bridge                    # Internet-facing — Telegram Bot API
+  athena-net:
+    external: true
+    name: athena_athena-net           # Join the Athena internal network
+
+volumes:
+  n8n-data:

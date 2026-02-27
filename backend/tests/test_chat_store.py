@@ -176,3 +176,72 @@ class TestSessionNodeIds:
 
     def test_get_session_node_ids_not_found(self, chat_store):
         assert chat_store.get_session_node_ids("00000000-0000-0000-0000-000000000000") == set()
+
+
+class TestTelegramSessions:
+    """Phase 3: Telegram session management methods."""
+
+    def test_get_or_create_session_creates(self, chat_store):
+        session = chat_store.get_or_create_session("tg-1936233108")
+        assert session["id"] == "tg-1936233108"
+        assert session["title"] == "New Session"
+        assert session["messages"] == []
+
+    def test_get_or_create_session_returns_existing(self, chat_store):
+        chat_store.get_or_create_session("tg-1936233108")
+        chat_store.append_message("tg-1936233108", {"role": "user", "content": "hi"})
+        session = chat_store.get_or_create_session("tg-1936233108")
+        assert len(session["messages"]) == 1
+
+    def test_message_count(self, chat_store):
+        session = chat_store.create_session()
+        assert chat_store.message_count(session["id"]) == 0
+        chat_store.append_message(session["id"], {"role": "user", "content": "1"})
+        chat_store.append_message(session["id"], {"role": "assistant", "content": "2"})
+        assert chat_store.message_count(session["id"]) == 2
+
+    def test_message_count_not_found(self, chat_store):
+        assert chat_store.message_count("00000000-0000-0000-0000-000000000000") == 0
+
+
+class TestPendingUpdates:
+    """Phase 3: Pending graph update queue for Telegram confirm/dismiss flow."""
+
+    def test_set_and_get_pending(self, chat_store):
+        session = chat_store.create_session()
+        updates = [
+            {"action": "create", "node_id": "goal-x", "type": "goal", "title": "Goal X"},
+            {"action": "link", "source": "goal-x", "target": "person-y"},
+        ]
+        assert chat_store.set_pending_updates(session["id"], updates) is True
+        assert chat_store.get_pending_updates(session["id"]) == updates
+
+    def test_pop_pending_update(self, chat_store):
+        session = chat_store.create_session()
+        updates = [
+            {"action": "create", "node_id": "a", "title": "A"},
+            {"action": "create", "node_id": "b", "title": "B"},
+        ]
+        chat_store.set_pending_updates(session["id"], updates)
+        first = chat_store.pop_pending_update(session["id"])
+        assert first["node_id"] == "a"
+        remaining = chat_store.get_pending_updates(session["id"])
+        assert len(remaining) == 1
+        assert remaining[0]["node_id"] == "b"
+
+    def test_pop_pending_empty(self, chat_store):
+        session = chat_store.create_session()
+        assert chat_store.pop_pending_update(session["id"]) is None
+
+    def test_pop_pending_not_found(self, chat_store):
+        assert chat_store.pop_pending_update("00000000-0000-0000-0000-000000000000") is None
+
+    def test_set_pending_not_found(self, chat_store):
+        assert chat_store.set_pending_updates("00000000-0000-0000-0000-000000000000", []) is False
+
+    def test_get_pending_not_found(self, chat_store):
+        assert chat_store.get_pending_updates("00000000-0000-0000-0000-000000000000") == []
+
+    def test_session_id_validation_rejects_traversal(self, chat_store):
+        with pytest.raises(ValueError):
+            chat_store.get_or_create_session("../../etc/passwd")

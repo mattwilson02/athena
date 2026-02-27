@@ -9,8 +9,8 @@ import uuid
 import logging
 from datetime import datetime, timezone
 
-# Valid session IDs: UUID format or wa-<hex> prefix (Phase 3)
-_SESSION_ID_RE = re.compile(r"^(wa-)?[a-f0-9-]+$")
+# Valid session IDs: UUID format or tg-<digits>/wa-<hex> prefix (Phase 3)
+_SESSION_ID_RE = re.compile(r"^(tg-[0-9]+|wa-[a-f0-9]+|[a-f0-9-]+)$")
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,32 @@ class ChatStore:
         self._write(session)
         return session
 
+    def get_or_create_session(self, session_id: str) -> dict:
+        """Get existing session or create one with the given ID (for tg-*/wa-* sessions)."""
+        session = self._read(session_id)
+        if session is not None:
+            return session
+        now = datetime.now(timezone.utc).isoformat()
+        session = {
+            "id": session_id,
+            "title": "New Session",
+            "created": now,
+            "updated": now,
+            "messages": [],
+        }
+        self._write(session)
+        return session
+
     def get_session(self, session_id: str) -> dict | None:
         """Return full session with messages, or None if not found."""
         return self._read(session_id)
+
+    def message_count(self, session_id: str) -> int:
+        """Return the number of messages in a session."""
+        session = self._read(session_id)
+        if session is None:
+            return 0
+        return len(session.get("messages", []))
 
     def append_message(self, session_id: str, message: dict) -> bool:
         """Append a message to a session. Returns False if session not found."""
@@ -131,6 +154,35 @@ class ChatStore:
             {"role": m["role"], "content": m["content"]}
             for m in session.get("messages", [])
         ]
+
+    def set_pending_updates(self, session_id: str, updates: list[dict]) -> bool:
+        """Store pending graph updates on a session (for Telegram confirm flow)."""
+        session = self._read(session_id)
+        if session is None:
+            return False
+        session["pending_updates"] = updates
+        self._write(session)
+        return True
+
+    def pop_pending_update(self, session_id: str) -> dict | None:
+        """Pop the first pending graph update. Returns None if empty or session missing."""
+        session = self._read(session_id)
+        if session is None:
+            return None
+        pending = session.get("pending_updates", [])
+        if not pending:
+            return None
+        update = pending.pop(0)
+        session["pending_updates"] = pending
+        self._write(session)
+        return update
+
+    def get_pending_updates(self, session_id: str) -> list[dict]:
+        """Return all pending graph updates for a session."""
+        session = self._read(session_id)
+        if session is None:
+            return []
+        return session.get("pending_updates", [])
 
     def get_session_node_ids(self, session_id: str) -> set[str]:
         """Return set of all node IDs from graph_updates in this session."""

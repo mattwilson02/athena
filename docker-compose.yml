@@ -64,7 +64,7 @@ services:
     mem_limit: 2g
     cpus: 2
     extra_hosts:
-      - "host.docker.internal:host-gateway"    # For OpenClaw gateway (Phase 2)
+      - "host.docker.internal:host-gateway"    # Host access (debugging, future use)
     networks:
       - athena-net                             # Internal — communicates with proxy + frontend
       - gateway-net                            # External — reaches Claude API + host

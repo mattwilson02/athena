@@ -75,6 +75,30 @@ def chat():
     return jsonify(result)
 
 
+@chat_bp.route("/api/chat/simple", methods=["POST"])
+def chat_simple():
+    """Non-streaming chat for Telegram/n8n. Auto-creates session, handles confirm/dismiss."""
+    data = request.json
+    if not data or not data.get("message", "").strip():
+        return jsonify({"error": "message is required"}), 400
+
+    session_id = data.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+
+    config = current_app.config.get("athena_config", {})
+    max_messages = config.get("telegram", {}).get("max_session_messages", 200)
+
+    result = current_app.config["chat_service"].send_simple_message(
+        session_id, data["message"], max_messages=max_messages
+    )
+
+    status = result.pop("status", 200)
+    if "error" in result:
+        return jsonify(result), status
+    return jsonify(result)
+
+
 @chat_bp.route("/api/chat/stream", methods=["POST"])
 def chat_stream():
     data = request.json

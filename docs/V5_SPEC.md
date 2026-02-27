@@ -1,13 +1,13 @@
-# Athena V5 — OpenClaw Migration + WhatsApp + Containerisation
+# Athena V5 — Containerisation + Hardening + Telegram
 
 ## Context
 
-Athena currently runs bare on localhost with direct Claude API token billing. Two problems:
+Athena currently runs bare on localhost with no containerisation or auth. Two problems:
 
-1. **Cost** — paying per API token when a Claude subscription is already being paid for
+1. **Security** — unauthenticated API, no process isolation, secrets in env vars
 2. **Access** — can only use Athena at the desk, no mobile access
 
-OpenClaw lets us route Claude calls through a subscription instead of API tokens. WhatsApp gives mobile access. Both require Athena to be properly containerised and hardened first — you can't expose an unauthenticated localhost API to the internet.
+Telegram gives mobile access, but first Athena must be properly containerised and hardened — you can't expose an unauthenticated localhost API to the internet.
 
 Security patterns are borrowed from a reference containerised knowledge-management project with proven containment architecture: non-root containers, capability dropping, bearer token auth, audit logging, secrets as files (not env vars), and path traversal prevention.
 
@@ -19,9 +19,8 @@ Security patterns are borrowed from a reference containerised knowledge-manageme
 |-----------|--------|
 | Flask backend | Bare on localhost:5001, no auth, no containerisation |
 | Claude API | Direct via Anthropic SDK (`anthropic==0.43.0`), per-token billing |
-| OpenClaw | Not installed |
 | n8n | Not set up |
-| WhatsApp | No webhook handling |
+| Telegram | No bot handling |
 | Docker | Minimal docker-compose exists, no security hardening |
 
 ### Claude API Touchpoints (4 total)
@@ -33,7 +32,7 @@ Security patterns are borrowed from a reference containerised knowledge-manageme
 | `GET /api/insights` | `insights_routes.py:40` | Fresh `anthropic.Anthropic()` per call |
 | `POST /api/graph/suggest-links` | `graph_routes.py:181` | Fresh `anthropic.Anthropic()` per call |
 
-All 4 need to be routed through a shared client that can point at OpenClaw.
+All 4 were consolidated into a shared client factory in Phase 2.
 
 ---
 
@@ -43,7 +42,7 @@ This is a personal knowledge graph containing goals, fears, finances, relationsh
 
 ### Principle: Explicit Access, Not Default Access
 
-Nothing gets access to anything unless we specifically grant it. The Docker container cannot see the host filesystem. The WhatsApp channel cannot see graph updates. The n8n webhook cannot write to the vault. Every boundary is enforced by code, not by trust.
+Nothing gets access to anything unless we specifically grant it. The Docker container cannot see the host filesystem. The Telegram channel cannot see graph updates. The n8n webhook cannot write to the vault. Every boundary is enforced by code, not by trust.
 
 ### Container Filesystem Isolation
 
@@ -135,7 +134,7 @@ Every write operation requires a bearer token. Each token maps to a named user w
 |------|-------------------|----------|
 | `web_ui` | `*` (all) | Full access from the Svelte frontend |
 | `n8n` | `chat`, `vault` | Webhook automation (Phase 3) |
-| `whatsapp` | `chat` only | Text-only chat — **no vault writes, no graph reads, no insights** |
+| `telegram` | `chat` only | Text-only chat — **no vault writes, no graph reads, no insights** |
 
 Read endpoints (`GET /api/graph`, `GET /api/schema`, etc.) are open by default for local dev convenience. All write endpoints (`POST`, `PATCH`, `DELETE`) always require auth.
 
@@ -147,7 +146,7 @@ Two hardening fixes applied to existing code:
 
 1. **Vault paths** — Replace the weak `".." in folder` string check with `safe_resolve()` using `Path.resolve()` + `.relative_to()`. This handles edge cases like encoded characters, symlinks, and normalisation bypasses.
 
-2. **Session IDs** — Validate that `session_id` matches UUID format before constructing file paths. Currently `chat_store.py` passes raw session IDs into `os.path.join()` — works because we generate UUIDs, but once WhatsApp sessions arrive (with `wa-` prefixed IDs), this needs explicit validation.
+2. **Session IDs** — Validate `session_id` format before constructing file paths. Regex accepts: UUIDs (`[a-f0-9-]+`), Telegram sessions (`tg-<digits>` — Telegram chat IDs are decimal integers), and legacy WhatsApp sessions (`wa-<hex>`).
 
 ### Secrets Management
 
@@ -159,7 +158,7 @@ Why files, not env vars:
 - Logging frameworks often capture env vars in crash reports
 - Files with restrictive permissions are only readable by the container process
 
-The `deployment/secrets/` directory is gitignored. The only secret in Phase 1 is the Anthropic API key (which becomes unnecessary once OpenClaw is primary in Phase 2).
+The `deployment/secrets/` directory is gitignored. Secrets include the Anthropic API key, bearer auth tokens, and proxy auth config (Phase 1-2). Telegram bot token is stored in n8n credentials (Phase 3).
 
 ### Audit Trail
 
@@ -167,7 +166,7 @@ Every write operation (POST, PATCH, DELETE) is logged to `/logs/audit.log` as JS
 
 ```json
 {"timestamp": "2026-02-27T14:30:00Z", "method": "POST", "path": "/api/vault/write", "user": "web_ui", "status": 200, "ip": "172.17.0.1"}
-{"timestamp": "2026-02-27T14:31:00Z", "method": "POST", "path": "/api/chat", "user": "whatsapp", "status": 200, "ip": "172.17.0.1"}
+{"timestamp": "2026-02-27T14:31:00Z", "method": "POST", "path": "/api/chat", "user": "telegram", "status": 200, "ip": "172.17.0.1"}
 {"timestamp": "2026-02-27T14:32:00Z", "method": "POST", "path": "/api/vault/write", "user": "anonymous", "status": 401, "ip": "172.17.0.1"}
 ```
 
@@ -190,28 +189,28 @@ Two origins allowed:
 
 In production mode, CORS is effectively irrelevant — the browser accesses everything through the proxy at `localhost:8080`, so all requests are same-origin. CORS only matters in dev mode when the frontend (5173) talks directly to the backend (5001).
 
-### WhatsApp Channel Restrictions (Phase 3)
+### Telegram Channel Restrictions (Phase 3)
 
-The WhatsApp integration is the most exposed surface. It faces the public internet (via Cloudflare tunnel) and accepts messages from an external platform. Extra precautions:
+The Telegram integration is the most exposed surface. It faces the public internet (via Cloudflare tunnel) and accepts messages from an external platform. Extra precautions:
 
 | Layer | Control |
 |-------|---------|
 | Cloudflare tunnel | TLS termination, DDoS protection, no direct IP exposure |
-| Non-guessable webhook path | Include a UUID segment in the webhook URL (e.g. `/webhook/<uuid>`) — reduces random scanning |
+| Non-guessable webhook path | Include a secret token segment in the webhook URL (e.g. `/webhook/<secret>`) — reduces random scanning |
 | Cloudflare rate limit | Global rate limit on the webhook path at Cloudflare level — stops volumetric abuse before it hits n8n |
-| HMAC-SHA256 | Every webhook payload verified against WhatsApp app secret |
-| Timestamp check | Reject messages older than 5 minutes (prevents replay attacks) |
-| **Sender allowlist** | Only whitelisted phone numbers are processed — all others silently dropped (empty by default) |
+| Telegram bot token | Webhook only receives updates from Telegram's servers (verified by secret token in URL path) |
+| **Chat ID allowlist** | **Single-user only** — your Telegram chat ID is the only one processed. All others silently dropped. Empty by default (fully locked down until you add your ID). |
 | Rate limiting | 10 messages per minute per sender (prevents spam/abuse) |
 | Field validation | Required fields checked before any processing |
-| Bearer token | n8n → Athena calls use a scoped `whatsapp` token (chat-only) |
-| Text-only responses | WhatsApp never sees `<graph_updates>`, node data, or internal metadata |
-| Session isolation | Each phone number gets its own session (hashed, not stored raw) |
-| Session cap | Max 100 messages per WhatsApp session before auto-reset |
+| Bearer token | n8n → Athena calls use a scoped `telegram` token (chat-only, no direct vault access) |
+| Text-only responses | Telegram never sees raw `<graph_updates>` XML, node metadata, or edge data |
+| Vault writes via confirmation only | Graph updates stored as pending proposals. User must explicitly reply "yes"/"confirm" to write. No arbitrary vault writes — only updates Athena proposed. |
+| Session isolation | Each chat ID gets its own session (prefixed with `tg-`) |
+| Session cap | Max 100 messages per Telegram session before auto-reset |
 
 **n8n admin UI isolation:** The Cloudflare tunnel must only expose the webhook endpoint path — **never the n8n admin UI**. If the n8n UI is accessible, an attacker can create/modify workflows, call arbitrary HTTP endpoints, and exfiltrate data. The n8n UI should only be reachable from `localhost:5678` directly. n8n must have built-in authentication enabled with a strong password.
 
-Even if someone compromises the WhatsApp webhook entirely, the worst they can do is send chat messages to Athena. They cannot read the graph, write nodes, access insights, or reach any other endpoint.
+Even if someone compromises the Telegram webhook entirely, the worst they can do is send chat messages to Athena and confirm graph updates that Athena herself proposed. They cannot craft arbitrary vault writes, read the graph, access insights, or reach any other endpoint. The `telegram` bearer token has `chat` permission only — vault writes happen internally through the chat service.
 
 ### Code Audit Findings (Pre-Existing)
 
@@ -231,7 +230,7 @@ The two moderate findings (session ID validation + folder path check) are addres
 ## Phase Order
 
 ```
-Phase 1: Containerise + Harden ──→ Phase 2: Client Refactor + Key Hardening ──→ Phase 3: n8n + WhatsApp
+Phase 1: Containerise + Harden ──→ Phase 2: Client Refactor + Key Hardening ──→ Phase 3: n8n + Telegram
 ```
 
 Each phase is independently deployable and testable. Phase 1 is the foundation.
@@ -431,13 +430,11 @@ users:
     endpoints: ["*"]             # Full access (chat, vault, graph, insights)
   n8n:
     endpoints: ["chat", "vault"] # Chat + write (no graph browsing)
-  whatsapp:
+  telegram:
     endpoints: ["chat"]          # Chat only — no vault writes, no graph reads
 
-# Claude API routing
+# Claude API
 claude:
-  base_url: null                 # null = direct API. Set to OpenClaw gateway URL in Phase 2.
-  fallback_url: "https://api.anthropic.com"
   model: "claude-sonnet-4-20250514"
 
 # Audit
@@ -452,7 +449,7 @@ All secrets live here — separated from config so config can be shared, logged,
 
 ```
 deployment/secrets/
-├── anthropic_api_key.txt        # Current API key (replaced by OpenClaw in Phase 2)
+├── anthropic_api_key.txt        # Anthropic API key
 └── auth_tokens.yaml             # Bearer tokens → user mapping
 ```
 
@@ -462,7 +459,7 @@ deployment/secrets/
 tokens:
   "REPLACE_WITH_GENERATED_TOKEN_1": "web_ui"
   "REPLACE_WITH_GENERATED_TOKEN_2": "n8n"        # Phase 3
-  "REPLACE_WITH_GENERATED_TOKEN_3": "whatsapp"   # Phase 3
+  "REPLACE_WITH_GENERATED_TOKEN_3": "telegram"   # Phase 3
 ```
 
 #### `backend/middleware/__init__.py` (empty)
@@ -613,7 +610,7 @@ def safe_resolve(base: Path, user_path: str) -> Path:
 |------|--------|
 | `server.py` | Load config from YAML file, load auth tokens from `secrets/auth_tokens.yaml`, load API key from `secrets/anthropic_api_key.txt`, register `require_auth` as `before_request`, register `log_audit` as `after_request`, add `GET /api/health` endpoint. Store tokens on `app.config["auth_tokens"]`. Keep `load_dotenv()` as dev-mode fallback. **CORS origins:** `http://localhost:5173` (dev) + `http://localhost:8080` (production proxy). |
 | `vault_service.py` | Replace weak `".." in folder` check (line 59) with `safe_resolve()`. Apply to `write()`, `update()`, `repair()`. |
-| `chat_store.py` | Validate `session_id` is UUID format in `_session_path()` — reject anything that isn't `[a-f0-9-]` or the `wa-` prefix (Phase 3). |
+| `chat_store.py` | Validate `session_id` in `_session_path()` — reject anything that isn't UUID `[a-f0-9-]`, `tg-<digits>` (Telegram chat IDs are decimal), or `wa-<hex>` (Phase 3). |
 | `frontend/src/lib/api.js` | Add `Authorization: Bearer ${token}` header to all `fetch` calls. Token loaded from localStorage or build-time env var. |
 | `.gitignore` | Add `deployment/secrets/`, `logs/` |
 
@@ -736,51 +733,95 @@ Revert the 6 modified files. The key loading path (`_load_secrets`) is unchanged
 
 ---
 
-## Phase 3: n8n + WhatsApp
+## Phase 3: n8n + Telegram
 
 ### Goal
 
-Text Athena from WhatsApp, get text responses back. n8n handles webhook routing and validation. Cloudflare tunnel provides secure external exposure.
+Text Athena from Telegram, get text responses back — including the ability to accept graph updates via confirm/decline keywords. n8n handles webhook routing and validation. Cloudflare tunnel provides secure external exposure.
 
 ### Architecture
 
 ```
-Phone (WhatsApp)
+Phone (Telegram)
     │
     ▼
-Meta Cloud API ─── webhook POST ───▶ Cloudflare Tunnel (TLS + DDoS protection)
-                                          │
-                                          ▼
-                                     n8n (port 5678)
-                                     ├─ Validate: HMAC-SHA256 signature
-                                     ├─ Validate: timestamp freshness (<5 min)
-                                     ├─ Validate: sender on allowlist
-                                     ├─ Validate: required fields
-                                     ├─ Rate limit: 10 msg/min per sender
-                                     │
-                                     ▼
-                                Athena API (bearer token auth)
-                                POST /api/chat/simple
-                                     │
-                                     ▼
-                                Format response (text only, ≤4000 chars)
-                                     │
-                                     ▼
-                                Send reply via WhatsApp Cloud API
+Telegram Bot API ─── webhook POST ───▶ Cloudflare Tunnel (TLS + DDoS protection)
+                                            │
+                                            ▼
+                                       n8n (port 5678)
+                                       ├─ Validate: chat ID on allowlist
+                                       ├─ Validate: required fields
+                                       ├─ Rate limit: 10 msg/min per sender
+                                       │
+                                       ▼
+                                  Athena API (bearer token auth)
+                                  POST /api/chat/simple
+                                       │
+                                       ├─ Normal message → chat response (text + pending updates)
+                                       ├─ "yes"/"confirm" → write pending update to vault
+                                       └─ "no"/"skip"    → dismiss pending update
+                                       │
+                                       ▼
+                                  Format response (text only, ≤4096 chars)
+                                       │
+                                       ▼
+                                  Send reply via Telegram Bot API (sendMessage)
 ```
 
-### Threat Model (WhatsApp-specific)
+### Telegram Graph Update Flow
+
+When Athena proposes a graph update in a Telegram session, the update is stored as `pending_updates` in the session (not sent to the user as raw `<graph_updates>` XML). Instead, a human-readable summary is appended to the text response:
+
+```
+User: "I started reading Atomic Habits"
+
+Athena: "Smart pick. James Clear's framework maps directly onto your
+habit-tracking nodes. The 1% improvement model connects to your
+cut-to-83kg goal — small daily wins compound.
+
+→ Add book node 'Atomic Habits'? Reply yes/no."
+```
+
+The user confirms or declines with a keyword:
+
+| Keyword | Action |
+|---------|--------|
+| `yes`, `confirm`, `accept`, `y` | Write pending update to vault, rebuild graph |
+| `no`, `decline`, `skip`, `n` | Dismiss pending update |
+| Anything else | Normal chat message (pending update stays) |
+
+**Key design decisions:**
+- Updates are proposed **one at a time** — if Athena suggests 3 updates, they queue and the user confirms each sequentially
+- Pending updates expire after 10 messages (auto-dismissed if the user moves on)
+- The `telegram` user keeps `chat`-only permission — vault writes happen internally through the chat service, never through a direct vault endpoint
+- The confirmation prompt is generated server-side (appended to Athena's response), not by Athena herself — so it can't be prompt-injected away
+
+### Threat Model (Telegram-specific)
 
 | Threat | Mitigation |
 |--------|-----------|
-| Unauthorised webhook calls | HMAC-SHA256 verification using WhatsApp app secret |
-| Replay attacks | Timestamp freshness check (reject >5 min old) |
+| Unauthorised webhook calls | Secret token in webhook URL path — only Telegram knows the path. Additionally, n8n validates the update structure. |
 | DoS / spam | Rate limiting (10 msg/min per sender), Cloudflare protection |
+| Unauthorised senders | **Single-user allowlist** — only your Telegram chat ID is processed, all others silently dropped. Starts empty (locked down by default). |
 | Malformed payloads | Required field validation before processing |
-| Cross-user session leakage | Sessions keyed by SHA-256 hash of phone number |
-| Graph update exposure to WhatsApp | Dedicated `/api/chat/simple` returns text only |
-| Unbounded session growth | Max message cap per WhatsApp session (auto-reset) |
+| Cross-user session leakage | Sessions keyed by `tg-{chat_id}` |
+| Graph update exposure to Telegram | Text-only responses — no raw `<graph_updates>` XML, no node metadata, no edge data |
+| Vault pollution via Telegram | Confirmations only apply to updates Athena proposed in the current session. No arbitrary vault writes — `telegram` user has `chat` permission only, vault writes are internal. |
+| Stolen telegram bearer token | Attacker can only chat + confirm existing proposals. Cannot craft vault writes, read graph, or access insights. Proposals are AI-generated (attacker can't control what gets proposed). |
+| Unbounded session growth | Max message cap per Telegram session (auto-reset) |
+| n8n compromise | n8n has no vault mount, no API keys. Bearer token grants `chat` only. Even full n8n takeover limits attacker to sending chat messages as the telegram user. |
 | n8n → Athena spoofing | Bearer token auth on internal calls |
+| n8n admin UI exposure | Cloudflare tunnel restricted to webhook path only — n8n UI never exposed to internet. Admin UI on `localhost:5678` only. |
+
+### Prerequisites (from Phase 1+2)
+
+These are already in place:
+
+- `chat_store.py` session ID regex accepts `tg-` prefixed IDs
+- `config.yaml` has `n8n` and `telegram` user permissions defined
+- `auth_tokens.yaml` has placeholder entries (tokens must be generated)
+- Auth middleware enforces endpoint scoping per user
+- `athena-net` exists as `internal: true` Docker network
 
 ### New Files
 
@@ -800,9 +841,10 @@ services:
       - WEBHOOK_URL=https://YOUR_TUNNEL.trycloudflare.com
       - N8N_DIAGNOSTICS_ENABLED=false
       - N8N_PERSONALIZATION_ENABLED=false
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - NODE_ENV=production
     volumes:
-      - ~/athena/n8n-data:/home/node/.n8n
+      - n8n-data:/home/node/.n8n
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -823,123 +865,135 @@ services:
 networks:
   n8n-net:
     driver: bridge
-    # n8n needs outbound to Meta WhatsApp API (graph.facebook.com) via n8n-net.
-    # Cannot use internal:true because it must reach Meta's API directly.
-    # Egress is restricted at the host firewall level instead (see below).
+    # n8n needs outbound to Telegram Bot API (api.telegram.org) via n8n-net.
+    # Cannot use internal:true because it must reach Telegram's API to send replies.
+    # n8n's damage is limited even without firewall restrictions — it has no vault mount,
+    # no API keys, and Athena's bearer token only grants `chat` access.
   athena-net:
     external: true
     name: athena_athena-net
     # Joins the internal network created by the main docker-compose.
     # Gives n8n direct access to athena:5001 without publishing ports.
     # Requires the main Athena stack to be running first.
+
+volumes:
+  n8n-data:
 ```
-
-**n8n egress restriction (host firewall):**
-
-n8n needs outbound internet for Meta's WhatsApp Cloud API (`graph.facebook.com`), so `n8n-net` cannot use Docker `internal: true`. Instead, restrict n8n's internet egress at the host level:
-
-```bash
-# /etc/pf.conf anchor for n8n egress
-# Allow n8n container subnet (on n8n-net) to reach only:
-#   1. graph.facebook.com (Meta WhatsApp Cloud API, resolve IPs)
-#   2. DNS (port 53, required for hostname resolution)
-#
-# n8n reaches Athena directly at athena:5001 via athena-net (internal Docker
-# network) — no host firewall rule needed for that path.
-
-# Block everything from n8n subnet by default
-block drop quick on bridge100 proto tcp from <n8n_subnet> to any
-# Allow DNS
-pass quick on bridge100 proto {tcp, udp} from <n8n_subnet> to any port 53
-# Allow Meta API (update IPs periodically: dig +short graph.facebook.com)
-pass quick on bridge100 proto tcp from <n8n_subnet> to <meta_api_ips> port 443
-```
-
-**Note:** This is a defense-in-depth measure. Even without the firewall, n8n's damage is limited — it has no vault mount, no API keys, and Athena's bearer token only grants `chat` access. n8n reaches Athena over the internal Docker network (not through the host), so the firewall only governs n8n's internet-facing traffic. The firewall prevents n8n from scanning your LAN or reaching other local services if compromised.
 
 #### n8n Workflow (configured in UI, exported as JSON)
 
 Nodes:
-1. **WhatsApp Trigger** — webhook receives POST from Meta Cloud API
-2. **Validate HMAC** — Code node: SHA-256 signature check using `X-Hub-Signature-256` header
-3. **Validate Freshness** — Code node: reject messages older than 5 minutes
-4. **Sender Allowlist** — Code node: check sender phone number against allowlist, silently drop if not whitelisted (allowlist configured in n8n credentials, starts empty)
-5. **Rate Limit** — Code node: track per-sender message count, reject if >10/min
-6. **Route to Athena** — HTTP Request: `POST http://athena:5001/api/chat/simple` with bearer token (via `athena-net`)
-7. **Format Response** — Code node: strip to plain text, truncate to 4000 chars
-8. **Send Reply** — WhatsApp Cloud API: send text message back to sender
+1. **Telegram Trigger** — n8n built-in Telegram trigger node, receives updates via webhook
+2. **Chat ID Allowlist** — Code node: check sender chat ID against allowlist, silently drop if not whitelisted (allowlist configured in n8n credentials, starts empty)
+3. **Rate Limit** — Code node: track per-sender message count, reject if >10/min
+4. **Route to Athena** — HTTP Request: `POST http://athena:5001/api/chat/simple` with bearer token (via `athena-net`). Body: `{"session_id": "tg-{chat_id}", "message": "{text}"}`
+5. **Format Response** — Code node: strip to plain text, truncate to 4096 chars (Telegram limit)
+6. **Send Reply** — Telegram node: `sendMessage` back to the chat
 
 #### New Secrets
+
+Generate n8n + telegram bearer tokens and add to `auth_tokens.yaml`:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"  # n8n token
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"  # telegram token
+```
+
+Generate n8n encryption key (used to encrypt stored credentials):
+
+```bash
+openssl rand -hex 32 > deployment/n8n/.env  # N8N_ENCRYPTION_KEY=<value>
+```
+
+Full secrets directory after Phase 3:
 
 ```
 deployment/secrets/
 ├── anthropic_api_key.txt        # Phase 1
-├── auth_tokens.yaml             # Phase 1 — bearer tokens for web_ui, n8n, whatsapp
+├── auth_tokens.yaml             # Phase 1+3 — bearer tokens for web_ui, n8n, telegram
 ├── proxy_auth.conf              # Phase 1 — nginx include, injects web_ui bearer token
-├── whatsapp_verify_token.txt    # Webhook verification challenge
-├── whatsapp_access_token.txt    # Meta Cloud API access token
-└── whatsapp_app_secret.txt      # HMAC signature verification
+deployment/n8n/.env              # N8N_ENCRYPTION_KEY (loaded by docker compose)
 ```
+
+The Telegram bot token is stored as a credential inside n8n (encrypted with `N8N_ENCRYPTION_KEY`), not as a file in `deployment/secrets/`. This is simpler than WhatsApp — no app secret, no verify token, no access token.
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `chat_store.py` | Add `create_session_with_id(session_id)` for stable WhatsApp sessions (keyed by `wa-{phone_hash}`). Add max message count check. |
-| `chat_routes.py` | Add `POST /api/chat/simple` — text-only response, no graph_updates, no relevant_nodes. For WhatsApp and other text-only clients. |
-| `config.yaml` | Add `whatsapp:` section: `max_response_length: 4000`, `session_prefix: "wa-"`, `max_session_messages: 100`, `allowed_senders: []` (empty — no one can message until a number is added). **Set `auth.protect_reads: true`** — now that n8n exists as a separate container, read endpoints must require auth to prevent unauthenticated graph scraping. |
+| `chat_store.py` | Add `get_or_create_session(session_id)` for stable Telegram sessions (keyed by `tg-{chat_id}`). Add `set_pending_updates(session_id, updates)` and `pop_pending_update(session_id)` for the confirm/decline queue. Add max message count check — return error if session exceeds cap. |
+| `chat_routes.py` | Add `POST /api/chat/simple` — synchronous text-only response. Detects confirm/decline keywords and delegates to `chat_service.confirm_pending()` or `chat_service.dismiss_pending()`. For Telegram and other text-only clients. |
+| `chat_service.py` | Add `send_simple_message(session_id, message)` — calls mentor, stores graph_updates as pending in session, appends confirmation prompt to text response, truncates to max length. Add `confirm_pending(session_id)` — pops next pending update, writes to vault via vault_service, returns confirmation text. Add `dismiss_pending(session_id)` — pops and dismisses. |
+| `config.yaml` | Add `telegram:` section: `max_response_length: 4096`, `session_prefix: "tg-"`, `max_session_messages: 100`. **Set `auth.protect_reads: true`** — now that n8n exists as a separate container, read endpoints must require auth to prevent unauthenticated graph scraping. |
+| `auth_tokens.yaml` | Add generated tokens for `n8n` and `telegram` users. |
 
 ### Infrastructure Setup
 
-1. Install cloudflared: `brew install cloudflare/cloudflare/cloudflared`
-2. Login: `cloudflared tunnel login`
-3. Create tunnel: `cloudflared tunnel create athena-webhook`
-4. Configure ingress (see below — **critical: restrict to webhook path only**)
-5. Start tunnel: `cloudflared tunnel run athena-webhook` (or launchd service)
-6. Register webhook URL in Meta Developer Dashboard
-7. Requires: WhatsApp Business account + Meta Developer app
+**Auth tokens:**
+1. Generate n8n + telegram bearer tokens (see "New Secrets" above)
+2. Add to `deployment/secrets/auth_tokens.yaml`
+3. Rebuild Athena container: `docker compose up -d --build athena`
 
-#### Cloudflare Tunnel Ingress Config
+**n8n:**
+4. Generate n8n encryption key and write to `deployment/n8n/.env`
+5. Start n8n: `cd deployment/n8n && docker compose up -d`
+6. Access `localhost:5678`, create admin account on first launch
+7. Build the Telegram workflow (see n8n Workflow section)
 
-**CRITICAL:** The tunnel must only expose the webhook endpoint — **never the n8n admin UI**. Without path restriction, the entire n8n instance (workflow editor, credentials, execution history) is publicly accessible.
+**Telegram bot:**
+8. Open Telegram, message `@BotFather`, send `/newbot`
+9. Choose a name and username — BotFather gives you a bot token
+10. Add bot token as a Telegram credential in n8n
+11. n8n's Telegram trigger node auto-registers the webhook with Telegram
 
-`~/.cloudflared/config.yml`:
+**Cloudflare tunnel:**
+12. Install cloudflared: `brew install cloudflare/cloudflare/cloudflared`
+13. Start quick tunnel: `cloudflared tunnel --url http://localhost:5678`
+14. Copy the generated URL → set as `WEBHOOK_URL` in n8n docker-compose
+15. Restart n8n to pick up the new webhook URL
+
+#### Cloudflare Tunnel Config
+
+Using a quick tunnel (`cloudflared tunnel --url http://localhost:5678`) for simplicity. The quick tunnel generates a random `*.trycloudflare.com` URL.
+
+**Security note:** The quick tunnel exposes all of n8n's ports. Ensure n8n has built-in authentication enabled (set up on first launch). The Telegram webhook path includes a secret token that prevents unauthorized access. For additional lockdown, use a named tunnel with ingress path restrictions:
+
 ```yaml
+# Optional: named tunnel with path restriction
 tunnel: athena-webhook
-credentials-file: /Users/mattwilson/.cloudflared/<tunnel-id>.json
-
 ingress:
-  # Only allow the WhatsApp webhook path (UUID segment prevents scanning)
   - hostname: athena-webhook.YOUR_DOMAIN.com
-    path: /webhook/<uuid>
+    path: /webhook/*
     service: http://localhost:5678
-  # Reject everything else with 404
   - service: http_status:404
 ```
 
-The `path` field restricts which URLs the tunnel will proxy. Any request that doesn't match `/webhook/<uuid>` gets a 404 from Cloudflare itself — it never reaches n8n. This means:
-- `/` → 404 (n8n UI not exposed)
-- `/rest/` → 404 (n8n API not exposed)
-- `/webhook/wrong-path` → 404
-- `/webhook/<uuid>` → forwarded to n8n (only valid path)
-
 ### Verification Checklist
 
-- [ ] n8n starts: `cd deployment/n8n && docker compose up -d`
+**Backend changes:**
+- [x] `POST /api/chat/simple` returns text-only response (no graph_updates)
+- [x] `POST /api/chat/simple` without bearer token → 401
+- [x] `POST /api/chat/simple` with telegram token → 200 (chat permission)
+- [x] `GET /api/graph` without token → 401 (protect_reads enabled)
+- [x] Telegram session hits message cap → error response
+- [x] Web UI completely unaffected by Telegram changes
+
+**n8n + tunnel:**
+- [x] n8n starts: `cd deployment/n8n && docker compose up -d`
 - [ ] n8n health: `curl localhost:5678/healthz` returns 200
-- [ ] Cloudflare tunnel running, URL accessible externally
-- [ ] Meta webhook verification succeeds (GET challenge)
-- [ ] Send "Hello" from WhatsApp → get Athena text response
-- [ ] Invalid HMAC signature → rejected (no forwarding to Athena)
-- [ ] Message from non-allowlisted number → silently dropped
+- [ ] n8n can reach Athena: workflow HTTP node → `http://athena:5001/api/health` returns 200
+- [x] Cloudflare tunnel running, webhook URL accessible externally
+
+**End-to-end:**
+- [ ] Send "Hello" from Telegram → get Athena text response
+- [ ] Message from non-allowlisted chat ID → silently dropped
 - [ ] 15 rapid messages → rate limited after 10
 - [ ] Restart n8n → webhook still works
-- [ ] Web UI completely unaffected by WhatsApp changes
-- [ ] WhatsApp response contains no `<graph_updates>` blocks
+- [ ] Telegram response contains no `<graph_updates>` blocks
 
 ### Rollback
 
-n8n is in a separate docker-compose — stop it without touching Athena. Disable webhook in Meta Developer Dashboard. Delete `wa-` prefixed session files if needed. Zero impact to web UI.
+n8n is in a separate docker-compose — stop it without touching Athena. Revoke bot token via @BotFather if needed. Delete `tg-` prefixed session files if needed. Zero impact to web UI.
 
 ---
 
@@ -949,13 +1003,13 @@ n8n is in a separate docker-compose — stop it without touching Athena. Disable
 |-------|-----------|---------------|
 | 1 | `backend/Dockerfile`, `frontend/Dockerfile`, `frontend/nginx.conf`, `frontend/.dockerignore`, `deployment/nginx/nginx.conf`, `docker-compose.yml`, `deployment/config/config.yaml`, `deployment/secrets/`, `backend/middleware/{__init__,auth,audit,security}.py` | `server.py`, `vault_service.py`, `chat_store.py`, `api.js`, `.gitignore` |
 | 2 | `backend/claude_client.py` | `server.py`, `mentor_agent.py`, `insights_routes.py`, `graph_routes.py`, `chat_service.py`, `chat_routes.py` |
-| 3 | `deployment/n8n/docker-compose.yml`, n8n workflow (JSON export), new secrets | `chat_store.py`, `chat_routes.py`, `config.yaml` |
+| 3 | `deployment/n8n/docker-compose.yml`, n8n workflow (JSON export), new secrets | `chat_store.py`, `chat_service.py`, `chat_routes.py`, `server.py`, `config.yaml`, `auth_tokens.yaml` |
 
 ---
 
 ## Open Questions
 
-- WhatsApp Business: virtual number (can't share personal number — it deregisters from regular WhatsApp)
+- ~~WhatsApp Business: virtual number~~ — Switched to Telegram (no Meta developer account needed, simpler setup)
 
 ---
 
@@ -966,5 +1020,5 @@ Borrowed from the reference project's containment philosophy:
 1. **Containment by architecture, not trust** — security enforced by code structure (capabilities, path resolution, token validation), not by hoping things behave
 2. **Secrets as files, never env vars** — prevents exposure in Docker inspect, logs, process listings
 3. **Audit everything that mutates** — if it writes to the vault or changes a session, it gets logged
-4. **Each phase is independently reversible** — if OpenClaw breaks, revert to direct API. If WhatsApp breaks, stop n8n. No cascading failures.
-5. **Text-only for external channels** — WhatsApp gets Athena's words but never graph update proposals, node data, or internal metadata
+4. **Each phase is independently reversible** — if Telegram breaks, stop n8n. Each phase can be rolled back without affecting the others.
+5. **Text-only for external channels** — Telegram gets Athena's words but never graph update proposals, node data, or internal metadata

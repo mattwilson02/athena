@@ -107,6 +107,7 @@ Key points for development:
 - `DELETE /api/chat/sessions/:id` — delete session
 - `POST /api/chat/sessions/:id/dismiss` — dismiss a graph update
 - `POST /api/chat` — send message (sync) `{session_id, message}` → `{response, graph_updates, relevant_nodes}`
+- `POST /api/chat/simple` — non-streaming text-only chat for Telegram/n8n `{session_id, message}` → `{response}`. Auto-creates tg-* sessions, handles confirm/dismiss keywords for pending graph updates.
 - `POST /api/chat/stream` — send message (SSE) → text/done/error events
 
 ### Graph
