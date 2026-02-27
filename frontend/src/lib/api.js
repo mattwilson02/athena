@@ -27,6 +27,14 @@ export function deleteSession(sessionId) {
   return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
 }
 
+export function renameSession(sessionId, title) {
+  return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+}
+
 export function dismissUpdate(sessionId, updateKey) {
   return fetchJSON(`${BASE}/chat/sessions/${encodeURIComponent(sessionId)}/dismiss`, {
     method: 'POST',
@@ -43,6 +51,48 @@ export function sendMessage(sessionId, message) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId, message }),
   });
+}
+
+export function streamMessage(sessionId, message, { onText, onDone, onError }) {
+  const controller = new AbortController();
+  fetch(`${BASE}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, message }),
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE lines
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete line in buffer
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === 'text') onText(event.content);
+            else if (event.type === 'done') onDone(event);
+            else if (event.type === 'error') onError(new Error(event.error));
+          } catch { /* skip malformed lines */ }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') onError(err);
+    });
+  return controller;
 }
 
 // --- Graph ---
@@ -65,6 +115,12 @@ export function getNodesByType(type) {
 
 export function searchNodes(query) {
   return fetchJSON(`${BASE}/search?q=${encodeURIComponent(query)}`);
+}
+
+// --- Activity ---
+
+export function getActivity(limit = 50) {
+  return fetchJSON(`${BASE}/activity?limit=${limit}`);
 }
 
 // --- Vault ---

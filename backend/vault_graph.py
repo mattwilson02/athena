@@ -63,6 +63,35 @@ class VaultGraph:
             neighbors.append(data)
         return neighbors
 
+    def get_neighbors_with_edges(self, node_id: str) -> list[dict]:
+        """Return neighbors with edge type and direction info."""
+        if node_id not in self.graph:
+            return []
+
+        neighbors = []
+        seen = set()
+
+        # Outgoing edges
+        for _, target, data in self.graph.out_edges(node_id, data=True):
+            node_data = dict(self.graph.nodes[target])
+            node_data["id"] = target
+            node_data["_edge_type"] = data.get("type", "relates_to")
+            node_data["_edge_direction"] = "outgoing"
+            neighbors.append(node_data)
+            seen.add(target)
+
+        # Incoming edges
+        for source, _, data in self.graph.in_edges(node_id, data=True):
+            node_data = dict(self.graph.nodes[source])
+            node_data["id"] = source
+            node_data["_edge_type"] = data.get("type", "relates_to")
+            node_data["_edge_direction"] = "incoming"
+            if source not in seen:
+                neighbors.append(node_data)
+            # If already seen from outgoing, still add to show bidirectional
+
+        return neighbors
+
     def get_nodes_by_type(self, node_type: str) -> list[dict]:
         """Return all nodes of a given type."""
         results = []

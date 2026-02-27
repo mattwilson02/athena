@@ -3,32 +3,39 @@
   import Sidebar from './lib/Sidebar.svelte';
   import ChatView from './lib/ChatView.svelte';
   import GraphView from './lib/GraphView.svelte';
+  import SearchModal from './lib/SearchModal.svelte';
+  import TimelineView from './lib/TimelineView.svelte';
 
   let currentView = $state('chat');
   let currentSessionId = $state(null);
   let sessions = $state([]);
   let schema = $state(null);
-  let graphFilter = $state(null); // {domain: 'Self'} or {type: 'goal'} or null
+  let graphFilter = $state(null);
+  let selectedGraphNode = $state(null);
+  let connectionError = $state(false);
+  let showSearch = $state(false);
 
   async function loadSessions() {
     try {
       const data = await listSessions();
       sessions = data.sessions;
+      connectionError = false;
       if (sessions.length > 0 && !currentSessionId) {
         currentSessionId = sessions[0].id;
       } else if (sessions.length === 0) {
         await handleNewSession();
       }
     } catch {
-      // Backend might not be up yet
+      connectionError = true;
     }
   }
 
   async function loadSchema() {
     try {
       schema = await getSchema();
+      connectionError = false;
     } catch {
-      // Fallback if backend not ready
+      // Backend not ready
     }
   }
 
@@ -48,11 +55,41 @@
     currentView = 'graph';
   }
 
+  function handleNodeSelect(nodeId) {
+    selectedGraphNode = nodeId;
+    currentView = 'graph';
+  }
+
+  function handleGlobalKeydown(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      showSearch = !showSearch;
+    }
+  }
+
+  function handleSearchSelect(nodeId) {
+    selectedGraphNode = nodeId;
+    currentView = 'graph';
+    showSearch = false;
+  }
+
   $effect(() => {
     loadSessions();
     loadSchema();
   });
 </script>
+
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+{#if showSearch}
+  <SearchModal onSelect={handleSearchSelect} onClose={() => showSearch = false} />
+{/if}
+
+{#if connectionError}
+  <div class="error-banner">
+    Backend not reachable. Make sure the server is running on port 5001.
+  </div>
+{/if}
 
 <div class="app-layout">
   <Sidebar
@@ -62,6 +99,7 @@
     {currentSessionId}
     onSessionSelect={handleSessionSelect}
     onNewSession={handleNewSession}
+    onSessionsUpdate={loadSessions}
     {schema}
     {graphFilter}
     onFilterChange={handleFilterChange}
@@ -71,9 +109,12 @@
       <ChatView
         sessionId={currentSessionId}
         onSessionUpdate={loadSessions}
+        onNodeSelect={handleNodeSelect}
       />
-    {:else}
-      <GraphView {schema} filter={graphFilter} />
+    {:else if currentView === 'graph'}
+      <GraphView {schema} filter={graphFilter} selectedNode={selectedGraphNode} />
+    {:else if currentView === 'timeline'}
+      <TimelineView onNodeSelect={handleNodeSelect} />
     {/if}
   </div>
 </div>
@@ -89,5 +130,15 @@
     flex: 1;
     overflow: hidden;
     position: relative;
+  }
+
+  .error-banner {
+    background: var(--error-soft);
+    color: var(--error);
+    text-align: center;
+    padding: var(--space-sm) var(--space-md);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    border-bottom: 1px solid var(--error);
   }
 </style>

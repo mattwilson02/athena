@@ -144,6 +144,9 @@ class VectorIndex:
 
     def rebuild(self, nodes: list[dict]) -> None:
         """Delete and recreate the collection, then re-index."""
-        self.client.delete_collection(COLLECTION_NAME)
-        self.collection = self.client.create_collection(COLLECTION_NAME)
+        try:
+            self.client.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass  # Collection may already be gone (reloader race)
+        self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
         self.index_all(nodes)
