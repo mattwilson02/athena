@@ -77,9 +77,12 @@
     loadSessions();
     loadSchema();
   });
-</script>
 
-<svelte:window onkeydown={handleGlobalKeydown} />
+  $effect(() => {
+    window.addEventListener('keydown', handleGlobalKeydown);
+    return () => window.removeEventListener('keydown', handleGlobalKeydown);
+  });
+</script>
 
 {#if showSearch}
   <SearchModal onSelect={handleSearchSelect} onClose={() => showSearch = false} />

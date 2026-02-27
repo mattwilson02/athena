@@ -1,24 +1,6 @@
 # Athena — Project Instructions
 
-> A self-hosted personal knowledge graph with an AI agent that captures, connects, and explores everything that matters to you.
-
-## Quick Context
-
-Athena builds a knowledge graph about your life — goals, fears, people, places, habits, finances, ideas, plans — stored as plain markdown files. The AI (named Athena) is sharp, direct, and strategic: she thinks in systems, surfaces connections you'd miss, and is aggressive about proposing graph updates.
-
-**Local-first.** Everything runs on your machine. The only external call is to the Claude API for reasoning.
-
-## Athena's Personality
-
-Athena is the goddess of wisdom and strategy. She sees the whole board.
-
-- **Sharp and direct** — no filler, no "Great question!", no pleasantries
-- **Thinks in systems** — every piece of information connects to something else
-- **Aggressive about capturing** — most conversations contain at least one node worth creating
-- **Calls out blind spots** — contradictions, neglected goals, patterns the user can't see
-- **Not a therapist** — a knowledge tool that tells you what you need to hear
-
-This personality is encoded in `backend/mentor_agent.py` (`_IDENTITY`, `_INSTRUCTIONS`) and should be consistent across all user-facing text (starter prompts, empty states, insights, error messages).
+> See [README.md](README.md) for project overview. See [SOUL.md](SOUL.md) for Athena's personality. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for technical deep-dive.
 
 ## Tech Stack
 
@@ -28,8 +10,8 @@ This personality is encoded in `backend/mentor_agent.py` (`_IDENTITY`, `_INSTRUC
 | Schema | `vault/_meta/schema.md` — single source of truth, parsed at boot |
 | Graph engine | NetworkX (Python) — in-memory directed graph |
 | Vector search | ChromaDB (local) — semantic similarity |
-| API server | Flask + flask-cors — REST, localhost:5000 |
-| AI reasoning | Claude Sonnet via Anthropic SDK |
+| API server | Flask + flask-cors — REST, localhost:5001 |
+| AI reasoning | Claude via Anthropic SDK |
 | Frontend | Svelte 5 + Vite — localhost:5173 |
 | Colours | `frontend/src/lib/colors.js` — shared type/domain colour maps |
 
@@ -40,113 +22,80 @@ athena/
 ├── vault/                        # Knowledge graph (markdown, git-tracked)
 │   ├── Self/Goals/Fears/Beliefs/Values/Habits/Skills/
 │   ├── People/Persons/Organisations/
-│   ├── Knowledge/Books/Articles/Ideas/Notes/
+│   ├── Knowledge/Books/Articles/Ideas/Notes/Movies/Quotes/Pills/
 │   ├── Life/Experiences/Daily/Memories/
 │   ├── Planning/Tasks/Projects/Reminders/Events/
 │   ├── Places/
 │   ├── Finance/Expenses/Subscriptions/Budgets/
 │   ├── _meta/schema.md           # Executable schema — domains, types, edges
-│   ├── _templates/               # Node file templates (24 types)
+│   ├── _templates/               # Node file templates
 │   └── _backup/                  # Archived V1 nodes (skipped by parser)
 ├── backend/
-│   ├── server.py                 # Flask API entry point
+│   ├── server.py                 # App factory (~90 lines) — boot + blueprint registration
+│   ├── routes/
+│   │   ├── chat_routes.py        # /api/chat/*, /api/chat/stream (SSE)
+│   │   ├── graph_routes.py       # /api/graph/*, /api/node/*, /api/search, /api/activity
+│   │   ├── vault_routes.py       # /api/vault/*
+│   │   └── insights_routes.py    # /api/insights
+│   ├── services/
+│   │   ├── vault_service.py      # File I/O, cross-referencing, repair
+│   │   └── chat_service.py       # Message orchestration (streaming + sync)
 │   ├── schema_parser.py          # Parses schema.md at boot
 │   ├── vault_parser.py           # Markdown → nodes + edges
 │   ├── vault_graph.py            # NetworkX graph wrapper
 │   ├── vector_search.py          # ChromaDB semantic search
-│   ├── mentor_agent.py           # Claude integration + retrieval
+│   ├── mentor_agent.py           # Claude integration + hybrid retrieval
 │   ├── chat_store.py             # Chat session persistence (JSON files)
 │   ├── requirements.txt
 │   └── .env                      # ANTHROPIC_API_KEY (never commit)
 ├── frontend/
 │   ├── src/
-│   │   ├── App.svelte            # Root — schema loading, view switching
+│   │   ├── App.svelte            # Root — view switching, Cmd+K search, schema loading
 │   │   ├── app.css               # Dark theme, CSS custom properties
 │   │   ├── main.js               # Svelte 5 mount
 │   │   └── lib/
-│   │       ├── api.js            # Fetch wrappers for all endpoints
+│   │       ├── api.js            # Fetch wrappers + streamMessage() for SSE
 │   │       ├── colors.js         # Shared type/domain colour maps
-│   │       ├── ChatView.svelte   # Chat interface + starter prompts
+│   │       ├── format.js         # Zero-dep markdown → HTML formatter
+│   │       ├── ChatView.svelte   # Streaming chat + starter prompts
 │   │       ├── GraphView.svelte  # Canvas force-directed graph
-│   │       ├── NodeDetail.svelte # Slide-in node detail panel
+│   │       ├── NodeDetail.svelte # Slide-in node detail + edit mode
 │   │       ├── Sidebar.svelte    # Sessions, stats, domain filters, insights
-│   │       └── GraphUpdateCard.svelte  # Accept/dismiss/merge cards
+│   │       ├── GraphUpdateCard.svelte  # Accept/dismiss/merge cards
+│   │       ├── SearchModal.svelte      # Cmd+K global search
+│   │       └── TimelineView.svelte     # Activity timeline
 │   ├── index.html
 │   ├── vite.config.js
 │   └── package.json
-└── docs/
-    ├── PRODUCT_SPEC.md           # V1 spec (historical)
-    └── V2_SPEC.md                # V2 spec (current)
+├── docs/
+│   ├── ARCHITECTURE.md           # Technical deep-dive
+│   └── archive/                  # Historical specs (V1, V2, V4, TEST_PLAN)
+├── SOUL.md                       # Athena's identity, voice, values, boundaries
+├── README.md                     # Project overview + quick start
+└── CLAUDE.md                     # This file
 ```
 
 ## Running Locally
 
 ```bash
 # Backend (requires ANTHROPIC_API_KEY in backend/.env)
-cd backend && python3 server.py
+cd backend && python3 server.py    # runs on port 5001
 
 # Frontend
-cd frontend && npm run dev
+cd frontend && npm run dev         # runs on port 5173
 ```
 
-Note: On macOS with system Python 3.9, all backend files use `from __future__ import annotations` for modern type hint syntax.
+Note: On macOS with system Python 3.9, all backend files use `from __future__ import annotations` for modern type hint syntax. Flask runs on port **5001** (macOS AirPlay conflict on 5000).
 
 ## Architecture
 
-### Schema-Driven
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full technical deep-dive (boot sequence, data flows, retrieval pipeline, vault format, extension guide).
 
-`vault/_meta/schema.md` is the single source of truth. At boot:
-1. `schema_parser.py` extracts domains, types, frontmatter fields, folder mappings, edge types
-2. System prompt is generated dynamically from the parsed schema
-3. Frontend fetches schema via `GET /api/schema` — UI renders dynamically
-4. Adding a new type = edit schema.md + create a template + restart. Zero code changes.
-
-### Two-Tier Type System
-
-7 domains containing 24 types:
-- **Self**: goal, fear, belief, value, habit, skill
-- **People**: person, organisation
-- **Knowledge**: book, article, idea, note
-- **Life**: experience, daily, memory
-- **Planning**: task, project, reminder, event
-- **Places**: place
-- **Finance**: expense, subscription, budget
-
-### Hybrid Retrieval (2-hop)
-
-1. Classify query domains (keyword heuristics, no API call)
-2. Semantic search (ChromaDB) — top 10 candidates
-3. Score & rank: semantic + domain boost + recency + centrality
-4. Take top 5, traverse 2 hops in NetworkX
-5. Tiered assembly: direct matches (full content), 1-hop (summary), 2-hop (one-liner)
-6. Cap at ~3000 tokens
-
-### Vault Nodes
-
-Every node is a markdown file with YAML frontmatter. Relationships are `[[wikilinks]]` under section headings:
-- `## Blockers` → `blocked_by`
-- `## Supports` → `supported_by`
-- `## Related` → `relates_to`
-- `## Contradicts` → `contradicts`
-- `## Inspired By` → `inspired_by`
-- `## People` → `involves`
-- `## Part Of` → `part_of`
-- `## Located In` → `located_in`
-- `## Funded By` → `funded_by`
-- `## Met At` → `met_at`
-- Links outside sections → `relates_to` (default)
-
-### AI Response Format
-
-The agent returns clean text plus optional `<graph_updates>` blocks proposing creates, updates, or links. The frontend shows these as accept/dismiss/merge cards. On accept, nodes are written to vault and the graph rebuilds.
-
-### Smart Linking
-
-When a node is accepted, the backend runs cross-reference scanning:
-1. Reverse scan — existing nodes whose content mentions the new node
-2. Forward scan — the new node's content mentions existing nodes
-3. Semantic similarity — related nodes not yet linked
-Results appear as suggested link cards below the accepted node.
+Key points for development:
+- `vault/_meta/schema.md` is the single source of truth — parsed at boot, drives everything
+- `server.py` is an app factory (~90 lines). Components stored on `app.config` for blueprint access
+- 7 domains, 27 types — never hardcode, always derive from schema
+- Wikilinks under `## Section` headings define edge types (see ARCHITECTURE.md for full mapping)
 
 ## API Endpoints
 
@@ -154,16 +103,20 @@ Results appear as suggested link cards below the accepted node.
 - `GET /api/chat/sessions` — list sessions
 - `POST /api/chat/sessions` — create session
 - `GET /api/chat/sessions/:id` — get session with messages
+- `PATCH /api/chat/sessions/:id` — rename session
 - `DELETE /api/chat/sessions/:id` — delete session
-- `POST /api/chat` — send message `{session_id, message}` → `{response, graph_updates, relevant_nodes}`
+- `POST /api/chat/sessions/:id/dismiss` — dismiss a graph update
+- `POST /api/chat` — send message (sync) `{session_id, message}` → `{response, graph_updates, relevant_nodes}`
+- `POST /api/chat/stream` — send message (SSE) → text/done/error events
 
 ### Graph
 - `GET /api/graph` — all nodes + edges
 - `GET /api/graph/stats` — counts and type breakdown
-- `GET /api/node/:id` — single node + neighbors
+- `GET /api/node/:id` — single node + neighbors with edge types
 - `GET /api/nodes?type=X&domain=Y` — filter by type or domain
 - `GET /api/schema` — parsed schema (domains, types, frontmatter, colours)
-- `GET /api/search?q=X` — semantic search
+- `GET /api/search?q=X` — title substring + semantic search (combined)
+- `GET /api/activity?limit=N` — timeline of created/updated nodes
 - `POST /api/graph/suggest-links` — AI-powered link suggestions
 
 ### Insights
@@ -173,6 +126,7 @@ Results appear as suggested link cards below the accepted node.
 - `POST /api/vault/write` — write node, returns suggested_links
 - `POST /api/vault/update` — patch existing node (frontmatter, content, tags, edges)
 - `POST /api/vault/rebuild` — rebuild graph + vector indexes
+- `POST /api/vault/repair` — walk vault and fix corrupted files
 
 ## Code Style
 
