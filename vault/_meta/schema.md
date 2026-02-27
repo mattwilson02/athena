@@ -170,6 +170,38 @@ domain:                 # Optional. What area this idea relates to.
 # No required type-specific fields. Use tags.
 ```
 
+### movie
+- **Domain:** Knowledge
+- **Folder:** Knowledge/Movies
+- **Description:** A film watched or to watch.
+- **Frontmatter:**
+```yaml
+director:               # Optional. Director name.
+status: to-watch        # watched | to-watch | abandoned
+rating:                 # Optional. 1-5.
+genre:                  # Optional. e.g. "drama", "sci-fi", "thriller"
+```
+
+### quote
+- **Domain:** Knowledge
+- **Folder:** Knowledge/Quotes
+- **Description:** A memorable passage, saying, or attribution.
+- **Frontmatter:**
+```yaml
+source:                 # Who said it — person, book, film.
+context:                # Optional. Where you encountered it.
+```
+
+### pill
+- **Domain:** Knowledge
+- **Folder:** Knowledge/Pills
+- **Description:** A life lesson, mental model, or personal realization. Broader than quotes — includes hard-won personal lessons, not just famous sayings.
+- **Frontmatter:**
+```yaml
+source:                 # Optional. Book, experience, or person it came from.
+domain:                 # Optional. philosophy | psychology | business | life | relationships
+```
+
 ### experience
 - **Domain:** Life
 - **Folder:** Life/Experiences

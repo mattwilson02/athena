@@ -25,7 +25,10 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "People": ["friend", "family", "colleague", "partner", "mentor", "person",
                "company", "team", "organisation", "relationship", "meet", "met"],
     "Knowledge": ["book", "article", "idea", "note", "read", "learn", "study",
-                   "concept", "insight", "research", "remember"],
+                   "concept", "insight", "research", "remember",
+                   "movie", "film", "watched", "director", "cinema",
+                   "quote", "saying", "passage", "attribution",
+                   "pill", "lesson", "mental model", "realization", "principle"],
     "Life": ["experience", "memory", "journal", "daily", "yesterday", "today",
              "weekend", "trip", "happened", "went", "felt", "diary"],
     "Planning": ["task", "project", "reminder", "event", "plan", "deadline",
@@ -175,10 +178,18 @@ _FORMAT_SPEC = """\
 GRAPH UPDATE FORMAT:
 CRITICAL: The "type" field MUST be one of these exact values: {type_enum}
 Do NOT invent new types. If nothing fits perfectly, pick the closest match.
-TYPE PRIORITY: Prefer specific types over generic ones. "note" and "idea" are LAST RESORT — most \
-information fits a more specific type. A project update is a "project", a salary fact is a "budget", \
-a workout plan is a "habit", a life lesson is a "belief" or "value". Only use "note" when nothing \
-else genuinely fits.
+TYPE PRIORITY: "note" and "idea" are LAST RESORT. NEVER use them if a specific type fits. Check this:
+- A film or movie → "movie" (NOT "note")
+- A quote or saying → "quote" (NOT "note" or "idea")
+- A life lesson, mental model, or realization → "pill" (NOT "note" or "belief")
+- A workout plan or routine → "habit" (NOT "note")
+- A project update → "project" (NOT "note")
+- A salary/money fact → "budget" or "expense" (NOT "note")
+- An observation about someone → update the "person" node (NOT "note")
+- A place detail → "place" (NOT "note")
+- A book/article takeaway → "idea" or update the "book"/"article"
+- A future plan or to-do → "task" or "project" (NOT "note")
+If you catch yourself typing "note", stop and reconsider.
 
 <graph_updates>
 [
@@ -326,6 +337,12 @@ def _node_context_minimal(node: dict) -> str:
     return f"- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) [ID: {node['id']}]"
 
 
+def _extract_session_topics(history: list[dict], max_messages: int = 5) -> list[str]:
+    """Extract recent user messages as additional query strings for session-aware retrieval."""
+    user_messages = [m["content"] for m in history if m.get("role") == "user"]
+    return user_messages[-max_messages:]
+
+
 class MentorAgent:
     """Claude-powered AI assistant with hybrid retrieval. Stateless — conversation
     history is passed in from the chat store."""
@@ -340,8 +357,11 @@ class MentorAgent:
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
         logger.info(f"System prompt built from schema ({len(self.system_prompt_template)} chars)")
 
-    def get_context(self, query: str) -> tuple[str, list[dict]]:
+    def get_context(self, query: str, conversation_history: list[dict] | None = None) -> tuple[str, list[dict]]:
         """Hybrid retrieval: semantic search + domain filtering + 2-hop traversal + tiered assembly.
+
+        If conversation_history is provided, recent user messages boost relevance of
+        nodes mentioned in the ongoing conversation.
 
         Returns (context_string, search_results).
         """
@@ -352,6 +372,18 @@ class MentorAgent:
         search_results = self.vector_index.search(query, n=10)
         if not search_results:
             return "(No relevant nodes found in knowledge graph)", []
+
+        # Session-aware boosting: search on recent user messages for additional context
+        session_boost: dict[str, float] = {}
+        if conversation_history:
+            session_topics = _extract_session_topics(conversation_history)
+            for topic in session_topics:
+                try:
+                    topic_results = self.vector_index.search(topic, n=5)
+                    for tr in topic_results:
+                        session_boost[tr["id"]] = session_boost.get(tr["id"], 0) + 0.05
+                except Exception:
+                    pass
 
         # Step 3: Score and rank results
         scored: list[tuple[float, dict]] = []
@@ -380,8 +412,24 @@ class MentorAgent:
             degree = self.graph.get_degree(result["id"])
             centrality_boost = min(degree * 0.03, 0.15)
 
-            total = semantic_score + domain_boost + recency_boost + centrality_boost
+            # Session boost — nodes relevant to conversation history
+            s_boost = session_boost.get(result["id"], 0.0)
+
+            total = semantic_score + domain_boost + recency_boost + centrality_boost + s_boost
             scored.append((total, result))
+
+        # Inject highly-boosted session nodes not already in results
+        result_ids = {r.get("id") for _, r in scored}
+        for nid, boost in session_boost.items():
+            if boost >= 0.1 and nid not in result_ids:
+                node = self.graph.get_node(nid)
+                if node:
+                    scored.append((boost, {
+                        "id": nid,
+                        "title": node.get("title", nid),
+                        "type": node.get("type", "unknown"),
+                        "score": 0.5,
+                    }))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         top_results = [r for _, r in scored[:5]]
@@ -457,12 +505,93 @@ class MentorAgent:
         )
         return context, top_results
 
+    def chat_stream(self, message: str, conversation_history: list[dict]):
+        """Streaming version of chat(). Yields (event_type, data) tuples.
+
+        Events:
+          ("text", {"content": str})  — streamed text token
+          ("done", {response, full_response, graph_updates, relevant_nodes})
+        """
+        context, search_results = self.get_context(message, conversation_history)
+        today = date.today().strftime("%A %d %B %Y")
+        system = self.system_prompt_template.format(context=context, today=today)
+        messages = conversation_history + [{"role": "user", "content": message}]
+
+        full_text = ""
+        streaming_text = ""  # text sent to frontend (stops at <graph_updates>)
+        in_graph_block = False
+        tag_buffer = ""
+
+        with self.client.messages.stream(
+            model=self.model,
+            max_tokens=4096,
+            system=system,
+            messages=messages,
+        ) as stream:
+            for text in stream.text_stream:
+                full_text += text
+
+                if in_graph_block:
+                    # Already inside <graph_updates>, don't stream to frontend
+                    continue
+
+                # Check if this chunk starts or contains the opening tag
+                tag_buffer += text
+                tag_start = tag_buffer.find("<graph_updates>")
+
+                if tag_start != -1:
+                    # Send any text before the tag
+                    before_tag = tag_buffer[:tag_start]
+                    if before_tag:
+                        streaming_text += before_tag
+                        yield ("text", {"content": before_tag})
+                    in_graph_block = True
+                    tag_buffer = ""
+                    continue
+
+                # If buffer could contain a partial "<graph_updates>" tag, hold it
+                if "<" in tag_buffer:
+                    # Check if the end of the buffer could be the start of the tag
+                    potential = "<graph_updates>"
+                    tail = tag_buffer[tag_buffer.rfind("<"):]
+                    if potential.startswith(tail):
+                        # Partial match — flush everything before the "<" and hold the rest
+                        safe = tag_buffer[:tag_buffer.rfind("<")]
+                        if safe:
+                            streaming_text += safe
+                            yield ("text", {"content": safe})
+                        tag_buffer = tail
+                        continue
+
+                # No tag concerns — flush the whole buffer
+                streaming_text += tag_buffer
+                yield ("text", {"content": tag_buffer})
+                tag_buffer = ""
+
+        # Flush any remaining buffer (if stream ended without <graph_updates>)
+        if tag_buffer and not in_graph_block:
+            streaming_text += tag_buffer
+            yield ("text", {"content": tag_buffer})
+
+        clean_text, graph_updates = self._parse_graph_updates(full_text)
+        graph_updates = self._validate_types(graph_updates)
+
+        yield ("done", {
+            "response": clean_text,
+            "full_response": full_text,
+            "graph_updates": graph_updates,
+            "relevant_nodes": [
+                {"id": r["id"], "title": r.get("title", r["id"]), "type": r.get("type", "unknown")}
+                for r in search_results
+            ],
+        })
+
     def chat(self, message: str, conversation_history: list[dict]) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
         """
-        context, search_results = self.get_context(message)
+        context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
 
@@ -482,6 +611,7 @@ class MentorAgent:
             raise
 
         clean_text, graph_updates = self._parse_graph_updates(assistant_text)
+        graph_updates = self._validate_types(graph_updates)
 
         return {
             "response": clean_text,
@@ -513,3 +643,25 @@ class MentorAgent:
             return clean_text, []
 
         return clean_text, updates
+
+    def _validate_types(self, updates: list[dict]) -> list[dict]:
+        """Post-process graph updates to catch invalid or misclassified types."""
+        valid_types = set(self.schema.get("type_list", []))
+        for update in updates:
+            if update.get("action") != "create":
+                continue
+            proposed = update.get("type", "")
+            if proposed in valid_types:
+                continue
+            # Try lowercase
+            lower = proposed.lower().strip()
+            if lower in valid_types:
+                update["type"] = lower
+                continue
+            # Unknown type — fall back to note
+            logger.warning(
+                f"AI proposed invalid type '{proposed}' for '{update.get('node_id')}' "
+                f"— falling back to 'note'"
+            )
+            update["type"] = "note"
+        return updates

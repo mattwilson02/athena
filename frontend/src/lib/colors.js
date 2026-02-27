@@ -11,7 +11,7 @@ const TYPE_COLORS = {
   person: '#60a5fa', organisation: '#3b82f6',
   // Knowledge (yellows / cyans)
   book: '#fbbf24', article: '#f59e0b', idea: '#eab308', note: '#a3a3a3',
-  interest: '#22d3ee',
+  interest: '#22d3ee', movie: '#e9d5ff', quote: '#d4fc79', pill: '#ff6b6b',
   // Life (purples / grays)
   experience: '#e879f9', daily: '#94a3b8', memory: '#c084fc',
   // Planning (sky blues)
@@ -33,11 +33,11 @@ const DOMAIN_COLORS = {
 };
 
 export function getTypeColor(type) {
-  return TYPE_COLORS[type] || '#888';
+  return TYPE_COLORS[type] || '#888888';
 }
 
 export function getDomainColor(domain) {
-  return DOMAIN_COLORS[domain] || '#888';
+  return DOMAIN_COLORS[domain] || '#888888';
 }
 
 export { TYPE_COLORS, DOMAIN_COLORS };

@@ -6,6 +6,7 @@
   let status = $state(update._dismissed ? 'dismissed' : update._alreadyInVault ? 'accepted' : 'pending');
   let errorMsg = $state('');
   let suggestedLinks = $state([]);
+  let collapsed = $state(status === 'accepted');
 
   const ACTION_LABELS = {
     create: 'New',
@@ -21,8 +22,15 @@
 
   function badgeColor() {
     if (update.action === 'link') return '#64748b';
-    if (update.action === 'update') return '#f59e0b';
+    if (update.action === 'update') return 'var(--warning)';
     return getTypeColor(update.type);
+  }
+
+  function borderColor() {
+    if (status === 'accepted') return 'var(--success)';
+    if (status === 'writing') return 'var(--accent)';
+    if (status === 'error') return 'var(--error)';
+    return 'var(--border)';
   }
 
   function cardTitle() {
@@ -72,6 +80,7 @@
         await acceptLink();
       }
       status = 'accepted';
+      collapsed = true;
       onAccepted();
     } catch (e) {
       console.error('GraphUpdateCard accept error:', e);
@@ -100,7 +109,6 @@
       edges: update.edges || [],
     });
 
-    // Surface any cross-reference suggestions
     if (result.suggested_links?.length) {
       suggestedLinks = result.suggested_links.map(link => ({
         ...link,
@@ -159,6 +167,7 @@
       }
       await updateNode(existingId, changes);
       status = 'accepted';
+      collapsed = true;
       onAccepted();
     } catch (e) {
       console.error('GraphUpdateCard merge error:', e);
@@ -168,7 +177,6 @@
 
   function dismiss() {
     status = 'dismissed';
-    // Persist dismiss so it survives reload
     const key = update.node_id || update.source || `${update.action}-${update.title}`;
     if (sessionId && key) {
       dismissUpdate(sessionId, key).catch(() => {});
@@ -178,44 +186,76 @@
 </script>
 
 {#if status !== 'dismissed'}
-  <div class="update-card" class:accepted={status === 'accepted'} class:error={status === 'error'}>
-    <div class="card-header">
-      <span class="action-label">{ACTION_LABELS[update.action] || update.action}</span>
-      <span class="type-badge" style="background: {badgeColor()}">{badgeText()}</span>
-      <span class="card-title">{cardTitle()}</span>
+  {#if collapsed && (status === 'accepted')}
+    <button
+      class="update-card collapsed"
+      style="border-left-color: {borderColor()}"
+      onclick={() => collapsed = false}
+    >
+      <div class="card-header">
+        <span class="action-label">{ACTION_LABELS[update.action] || update.action}</span>
+        <span class="type-badge" style="background: {badgeColor()}">{badgeText()}</span>
+        <span class="card-title">{cardTitle()}</span>
+        <span class="status-done">Done</span>
+      </div>
+    </button>
+  {:else}
+    <div
+      class="update-card"
+      class:writing={status === 'writing'}
+      class:accepted={status === 'accepted'}
+      class:error={status === 'error'}
+      style="border-left-color: {borderColor()}"
+    >
+      <div class="card-header">
+        <span class="action-label">{ACTION_LABELS[update.action] || update.action}</span>
+        <span class="type-badge" style="background: {badgeColor()}">{badgeText()}</span>
+        <span class="card-title">{cardTitle()}</span>
+      </div>
+
+      {#if cardDescription()}
+        <p class="card-content">{cardDescription()}</p>
+      {/if}
+
+      {#if update.action === 'create' && update.edges?.length && status === 'pending'}
+        <div class="proposed-edges">
+          {#each update.edges as edge}
+            <span class="edge-pill">{edge.type} → {edge.target}</span>
+          {/each}
+        </div>
+      {/if}
+
+      {#if hasDuplicate && status === 'pending'}
+        <div class="dedup-warning">
+          Similar node exists: <strong>{update._duplicate.existing_title}</strong> ({update._duplicate.existing_type})
+        </div>
+      {/if}
+
+      {#if status === 'pending'}
+        <div class="card-actions">
+          {#if hasDuplicate}
+            <button class="btn-merge" onclick={mergeIntoExisting}>Merge</button>
+            <button class="btn-accept" onclick={accept}>Create New</button>
+          {:else}
+            <button class="btn-accept" onclick={accept}>Accept</button>
+          {/if}
+          <button class="btn-dismiss" onclick={dismiss}>Dismiss</button>
+        </div>
+      {:else if status === 'writing'}
+        <div class="card-status">Writing to vault...</div>
+      {:else if status === 'accepted'}
+        <div class="card-status accepted-text">
+          {update.action === 'update' ? 'Node updated' : update.action === 'link' ? 'Linked' : 'Added to vault'}
+        </div>
+      {:else if status === 'error'}
+        <div class="card-status error-text">{errorMsg || 'Failed to write'}</div>
+        <div class="card-actions">
+          <button class="btn-accept" onclick={accept}>Retry</button>
+          <button class="btn-dismiss" onclick={dismiss}>Dismiss</button>
+        </div>
+      {/if}
     </div>
-
-    {#if cardDescription()}
-      <p class="card-content">{cardDescription()}</p>
-    {/if}
-
-    {#if hasDuplicate && status === 'pending'}
-      <div class="dedup-warning">
-        <span class="dedup-icon">~</span>
-        Similar node exists: <strong>{update._duplicate.existing_title}</strong> ({update._duplicate.existing_type})
-      </div>
-    {/if}
-
-    {#if status === 'pending'}
-      <div class="card-actions">
-        {#if hasDuplicate}
-          <button class="btn-merge" onclick={mergeIntoExisting}>Merge</button>
-          <button class="btn-accept" onclick={accept}>Create New</button>
-        {:else}
-          <button class="btn-accept" onclick={accept}>Accept</button>
-        {/if}
-        <button class="btn-dismiss" onclick={dismiss}>Dismiss</button>
-      </div>
-    {:else if status === 'writing'}
-      <div class="card-status">Writing to vault...</div>
-    {:else if status === 'accepted'}
-      <div class="card-status accepted-text">
-        {update.action === 'update' ? 'Node updated' : update.action === 'link' ? 'Linked' : 'Added to vault'}
-      </div>
-    {:else if status === 'error'}
-      <div class="card-status error-text">{errorMsg || 'Failed to write'}</div>
-    {/if}
-  </div>
+  {/if}
 
   {#if suggestedLinks.length > 0}
     <div class="suggested-links">
@@ -247,24 +287,56 @@
   .update-card {
     background: var(--bg-surface);
     border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
     border-radius: var(--radius);
     padding: 12px;
-    margin-top: 8px;
+    margin-top: var(--space-sm);
+    transition: all var(--transition-normal);
   }
 
   .update-card.accepted {
-    border-color: #4ade8040;
     opacity: 0.7;
   }
 
+  .update-card.writing {
+    animation: pulse-border 1.5s infinite;
+  }
+
   .update-card.error {
-    border-color: #f8717140;
+    background: var(--error-soft);
+  }
+
+  .update-card.collapsed {
+    padding: 8px 12px;
+    cursor: pointer;
+    opacity: 0.6;
+    width: 100%;
+    text-align: left;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--success);
+    border-radius: var(--radius);
+    transition: all var(--transition-fast);
+  }
+
+  .update-card.collapsed:hover {
+    opacity: 0.85;
+    background: var(--bg-surface-hover);
+  }
+
+  .update-card.collapsed .card-header {
+    margin-bottom: 0;
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { border-left-color: var(--accent); }
+    50% { border-left-color: transparent; }
   }
 
   .card-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-sm);
     margin-bottom: 6px;
   }
 
@@ -280,7 +352,7 @@
   }
 
   .type-badge {
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 10px;
@@ -290,60 +362,81 @@
 
   .card-title {
     font-weight: 500;
-    font-size: 14px;
+    font-size: var(--text-base);
+    flex: 1;
+  }
+
+  .status-done {
+    font-size: var(--text-xs);
+    color: var(--success);
+    font-weight: 500;
   }
 
   .card-content {
-    font-size: 13px;
+    font-size: var(--text-sm);
     color: var(--text-secondary);
-    margin-bottom: 8px;
+    margin-bottom: var(--space-sm);
+    line-height: 1.5;
+  }
+
+  .proposed-edges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: var(--space-sm);
+  }
+
+  .edge-pill {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 500;
   }
 
   .dedup-warning {
-    font-size: 12px;
-    color: #f59e0b;
-    background: #f59e0b10;
-    border: 1px solid #f59e0b30;
+    font-size: var(--text-sm);
+    color: var(--warning);
+    background: var(--warning-soft);
+    border: 1px solid rgba(245, 158, 11, 0.2);
     border-radius: 6px;
     padding: 6px 10px;
-    margin-bottom: 8px;
-  }
-
-  .dedup-icon {
-    font-weight: 700;
-    margin-right: 4px;
+    margin-bottom: var(--space-sm);
   }
 
   .card-actions {
     display: flex;
-    gap: 8px;
+    gap: var(--space-sm);
   }
 
   .btn-accept {
     padding: 5px 14px;
     border: none;
     border-radius: 6px;
-    background: #4ade80;
+    background: var(--success);
     color: #0f0f1a;
-    font-size: 12px;
+    font-size: var(--text-sm);
     font-weight: 600;
     cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
-  .btn-accept:hover { background: #22c55e; }
+  .btn-accept:hover { background: #22c55e; transform: translateY(-1px); }
 
   .btn-merge {
     padding: 5px 14px;
     border: none;
     border-radius: 6px;
-    background: #f59e0b;
+    background: var(--warning);
     color: #0f0f1a;
-    font-size: 12px;
+    font-size: var(--text-sm);
     font-weight: 600;
     cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
-  .btn-merge:hover { background: #d97706; }
+  .btn-merge:hover { background: #d97706; transform: translateY(-1px); }
 
   .btn-dismiss {
     padding: 5px 14px;
@@ -351,31 +444,32 @@
     border-radius: 6px;
     background: transparent;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--text-sm);
     cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
   .btn-dismiss:hover { background: var(--bg-surface-hover); }
 
   .card-status {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--text-muted);
   }
 
-  .accepted-text { color: #4ade80; }
-  .error-text { color: #f87171; }
+  .accepted-text { color: var(--success); }
+  .error-text { color: var(--error); }
 
   /* Suggested links */
   .suggested-links {
     margin-top: 6px;
-    padding: 8px;
+    padding: var(--space-sm);
     background: var(--bg-surface);
     border: 1px dashed var(--border);
     border-radius: var(--radius);
   }
 
   .suggested-header {
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-weight: 600;
     color: var(--text-muted);
     text-transform: uppercase;
@@ -386,49 +480,42 @@
   .link-suggestion {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-sm);
     padding: 4px 0;
-    font-size: 12px;
+    font-size: var(--text-sm);
     flex-wrap: wrap;
   }
 
-  .link-suggestion.accepted {
-    opacity: 0.6;
-  }
+  .link-suggestion.accepted { opacity: 0.6; }
 
-  .link-arrow {
-    color: var(--text-primary);
-    font-weight: 500;
-  }
+  .link-arrow { color: var(--text-primary); font-weight: 500; }
 
   .link-type {
     padding: 1px 6px;
     border-radius: 4px;
-    background: #64748b30;
-    color: #94a3b8;
+    background: rgba(100, 116, 139, 0.2);
+    color: var(--text-muted);
     font-size: 10px;
   }
 
   .link-reason {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--text-xs);
     flex: 1;
   }
 
-  .link-status {
-    font-size: 11px;
-    color: var(--text-muted);
-  }
+  .link-status { font-size: var(--text-xs); color: var(--text-muted); }
 
   .btn-link-accept {
     padding: 2px 10px;
     border: none;
     border-radius: 4px;
-    background: #4ade80;
+    background: var(--success);
     color: #0f0f1a;
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-weight: 600;
     cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
   .btn-link-accept:hover { background: #22c55e; }
@@ -439,8 +526,9 @@
     border-radius: 4px;
     background: transparent;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--text-xs);
     cursor: pointer;
+    transition: all var(--transition-fast);
   }
 
   .btn-link-dismiss:hover { background: var(--bg-surface-hover); }

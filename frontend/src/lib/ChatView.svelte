@@ -1,14 +1,18 @@
 <script>
-  import { sendMessage, getSession, getGraph } from './api.js';
+  import { streamMessage, getSession, getGraph } from './api.js';
+  import { getTypeColor } from './colors.js';
+  import { formatText } from './format.js';
   import GraphUpdateCard from './GraphUpdateCard.svelte';
 
-  let { sessionId = null, onSessionUpdate = () => {} } = $props();
+  let { sessionId = null, onSessionUpdate = () => {}, onNodeSelect = () => {} } = $props();
 
   let messages = $state([]);
   let inputText = $state('');
   let isLoading = $state(false);
+  let isStreaming = $state(false);
   let messagesContainer = $state(null);
   let loadedSessionId = $state(null);
+  let abortController = $state(null);
 
   const starterPrompts = [
     "What do you see in my graph?",
@@ -69,26 +73,48 @@
     messages = [...messages, userMsg];
     inputText = '';
     isLoading = true;
+    isStreaming = true;
 
-    try {
-      const result = await sendMessage(sessionId, text);
-      messages = [...messages, {
-        role: 'assistant',
-        content: result.response,
-        graphUpdates: result.graph_updates || [],
-        relevantNodes: result.relevant_nodes || [],
-      }];
-      onSessionUpdate();
-    } catch (err) {
-      messages = [...messages, {
-        role: 'assistant',
-        content: err.message || 'Something went wrong. Try again.',
-        isError: true,
-        _retryText: text,
-      }];
-    } finally {
-      isLoading = false;
-    }
+    // Push a placeholder assistant message for streaming
+    let streamingContent = '';
+    messages = [...messages, {
+      role: 'assistant',
+      content: '',
+      isStreaming: true,
+    }];
+
+    abortController = streamMessage(sessionId, text, {
+      onText(token) {
+        streamingContent += token;
+        const last = messages[messages.length - 1];
+        messages = [...messages.slice(0, -1), { ...last, content: streamingContent }];
+      },
+      onDone(event) {
+        // Finalize the streaming message with graph updates and relevant nodes
+        messages = [...messages.slice(0, -1), {
+          role: 'assistant',
+          content: event.response,
+          graphUpdates: event.graph_updates || [],
+          relevantNodes: event.relevant_nodes || [],
+        }];
+        isLoading = false;
+        isStreaming = false;
+        abortController = null;
+        onSessionUpdate();
+      },
+      onError(err) {
+        // Replace streaming placeholder with error
+        messages = [...messages.slice(0, -1), {
+          role: 'assistant',
+          content: err.message || 'Something went wrong. Try again.',
+          isError: true,
+          _retryText: text,
+        }];
+        isLoading = false;
+        isStreaming = false;
+        abortController = null;
+      },
+    });
   }
 
   function handleKeydown(e) {
@@ -101,7 +127,7 @@
   function autoResize(e) {
     const el = e.target;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    el.style.height = Math.min(el.scrollHeight, 150) + 'px';
   }
 </script>
 
@@ -109,6 +135,7 @@
   <div class="messages" bind:this={messagesContainer}>
     {#if messages.length === 0 && !isLoading}
       <div class="empty-state">
+        <div class="empty-avatar">A</div>
         <h3>Athena</h3>
         <p>Tell me what's going on. I'll remember everything and connect the dots.</p>
         <div class="starter-prompts">
@@ -122,13 +149,16 @@
     {#each messages as msg}
       <div class="message {msg.role}" class:error={msg.isError}>
         <div class="bubble">
-          {msg.content}
+          {#if msg.role === 'assistant' && !msg.isError}
+            {@html formatText(msg.content)}{#if msg.isStreaming}<span class="stream-cursor"></span>{/if}
+          {:else}
+            {msg.content}
+          {/if}
         </div>
 
         {#if msg.isError && msg._retryText}
           <button class="retry-btn" onclick={() => {
             const retryText = msg._retryText;
-            // Remove the error message and the user message before it
             const idx = messages.indexOf(msg);
             messages = messages.filter((m, i) => i !== idx && !(i === idx - 1 && m.role === 'user'));
             send(retryText);
@@ -145,18 +175,29 @@
 
         {#if msg.relevantNodes?.length > 0}
           <div class="relevant-nodes">
+            <span class="relevant-label">Context</span>
             {#each msg.relevantNodes as node}
-              <span class="node-chip">{node.title}</span>
+              <button
+                class="node-chip"
+                style="border-left-color: {getTypeColor(node.type)}"
+                onclick={() => onNodeSelect(node.id)}
+              >
+                <span class="chip-type">{node.type}</span>
+                <span class="chip-title">{node.title}</span>
+              </button>
             {/each}
           </div>
         {/if}
       </div>
     {/each}
 
-    {#if isLoading}
+    {#if isLoading && !isStreaming}
       <div class="message assistant">
         <div class="bubble loading">
-          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="thinking-text">Thinking</span>
+          <span class="thinking-dots">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </span>
         </div>
       </div>
     {/if}
@@ -187,11 +228,13 @@
   .messages {
     flex: 1;
     overflow-y: auto;
-    padding: 24px;
+    padding: var(--space-lg);
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--space-md);
   }
+
+  /* ── Empty state ── */
 
   .empty-state {
     display: flex;
@@ -200,65 +243,95 @@
     justify-content: center;
     flex: 1;
     text-align: center;
-    gap: 12px;
+    gap: var(--space-sm);
     color: var(--text-secondary);
   }
 
+  .empty-avatar {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: var(--space-xs);
+  }
+
   .empty-state h3 {
-    font-size: 20px;
+    font-size: var(--text-xl);
     color: var(--text-primary);
+  }
+
+  .empty-state p {
+    max-width: 360px;
+    line-height: 1.5;
   }
 
   .starter-prompts {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-sm);
     justify-content: center;
-    margin-top: 8px;
+    margin-top: var(--space-md);
   }
 
   .starter-chip {
-    padding: 8px 16px;
+    padding: 10px 18px;
     border: 1px solid var(--border);
     border-radius: 20px;
     background: var(--bg-surface);
     color: var(--text-primary);
-    font-size: 13px;
-    transition: all 0.15s;
+    font-size: var(--text-sm);
+    transition: all var(--transition-normal);
   }
 
   .starter-chip:hover {
     border-color: var(--accent);
     background: var(--bg-surface-hover);
+    transform: translateY(-1px);
   }
+
+  /* ── Messages ── */
 
   .message {
     display: flex;
     flex-direction: column;
-    max-width: 720px;
+    animation: msg-in 0.2s ease;
+  }
+
+  @keyframes msg-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
   .message.user {
     align-self: flex-end;
+    max-width: 65%;
   }
 
   .message.assistant {
     align-self: flex-start;
+    max-width: 85%;
   }
 
   .bubble {
     padding: 12px 16px;
     border-radius: var(--radius-lg);
-    font-size: 14px;
-    line-height: 1.6;
-    white-space: pre-wrap;
+    font-size: var(--text-base);
+    line-height: 1.7;
     word-wrap: break-word;
+    overflow-wrap: break-word;
   }
 
   .message.user .bubble {
     background: var(--accent);
     color: white;
     border-bottom-right-radius: 4px;
+    white-space: pre-wrap;
   }
 
   .message.assistant .bubble {
@@ -266,38 +339,111 @@
     border-bottom-left-radius: 4px;
   }
 
+  /* Formatted content inside assistant bubbles */
+  .message.assistant .bubble :global(p) {
+    margin-bottom: 0.4em;
+  }
+
+  .message.assistant .bubble :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .message.assistant .bubble :global(strong) {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .message.assistant .bubble :global(.fmt-inline-code) {
+    background: var(--bg-primary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    color: var(--accent);
+  }
+
+  .message.assistant .bubble :global(.fmt-code-block) {
+    background: var(--bg-primary);
+    padding: 12px;
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    overflow-x: auto;
+    margin: 0.5em 0;
+  }
+
+  .message.assistant .bubble :global(.fmt-h1),
+  .message.assistant .bubble :global(.fmt-h2),
+  .message.assistant .bubble :global(.fmt-h3) {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0.8em 0 0.3em;
+  }
+
+  .message.assistant .bubble :global(.fmt-h1) { font-size: var(--text-lg); }
+  .message.assistant .bubble :global(.fmt-h2) { font-size: var(--text-base); }
+
+  .message.assistant .bubble :global(.fmt-list) {
+    padding-left: 1.4em;
+    margin: 0.4em 0;
+  }
+
+  .message.assistant .bubble :global(li) {
+    margin: 0.15em 0;
+  }
+
+  .message.assistant .bubble :global(.fmt-wikilink) {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  /* ── Error state ── */
+
   .message.error .bubble {
-    background: #f8717120;
-    color: #f87171;
+    background: var(--error-soft);
+    color: var(--error);
   }
 
   .retry-btn {
     margin-top: 6px;
     padding: 4px 14px;
-    border: 1px solid #f8717140;
+    border: 1px solid rgba(248, 113, 113, 0.25);
     border-radius: var(--radius);
     background: transparent;
-    color: #f87171;
-    font-size: 12px;
+    color: var(--error);
+    font-size: var(--text-sm);
     cursor: pointer;
     align-self: flex-start;
-    transition: all 0.15s;
+    transition: all var(--transition-fast);
   }
 
   .retry-btn:hover {
-    background: #f8717115;
-    border-color: #f87171;
+    background: var(--error-soft);
+    border-color: var(--error);
   }
+
+  /* ── Loading ── */
 
   .bubble.loading {
     display: flex;
-    gap: 4px;
-    padding: 16px 20px;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 14px 20px;
+  }
+
+  .thinking-text {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+
+  .thinking-dots {
+    display: flex;
+    gap: 3px;
   }
 
   .dot {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     background: var(--text-muted);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
@@ -309,35 +455,88 @@
 
   @keyframes bounce {
     0%, 80%, 100% { transform: translateY(0); }
-    40% { transform: translateY(-6px); }
+    40% { transform: translateY(-5px); }
   }
 
+  /* ── Streaming cursor ── */
+
+  .stream-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1.1em;
+    background: var(--accent);
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    animation: blink 0.8s step-end infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  /* ── Graph updates ── */
+
   .graph-updates {
-    margin-top: 4px;
+    margin-top: var(--space-sm);
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-xs);
   }
+
+  /* ── Relevant nodes ── */
 
   .relevant-nodes {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 8px;
+    gap: 6px;
+    margin-top: 10px;
+    align-items: center;
+  }
+
+  .relevant-label {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-right: 2px;
   }
 
   .node-chip {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 10px;
+    font-size: var(--text-xs);
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--text-muted);
+    transition: all var(--transition-fast);
+    cursor: pointer;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .node-chip:hover {
     background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+
+  .chip-type {
+    font-size: 10px;
     color: var(--text-muted);
   }
 
+  .chip-title {
+    font-weight: 500;
+  }
+
+  /* ── Input area ── */
+
   .input-area {
     display: flex;
-    gap: 8px;
-    padding: 16px 24px;
+    gap: var(--space-sm);
+    padding: var(--space-md) var(--space-lg);
     border-top: 1px solid var(--border);
     background: var(--bg-primary);
   }
@@ -346,29 +545,38 @@
     flex: 1;
     padding: 12px 16px;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-input);
+    border-radius: var(--radius-lg);
+    background: var(--bg-surface);
     color: var(--text-primary);
     resize: none;
     outline: none;
     min-height: 44px;
-    max-height: 120px;
+    max-height: 150px;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   }
 
-  textarea:focus { border-color: var(--accent); }
+  textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
 
   textarea::placeholder { color: var(--text-muted); }
 
   .btn-send {
     padding: 0 20px;
     border: none;
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     background: var(--accent);
     color: white;
     font-weight: 600;
-    font-size: 14px;
+    font-size: var(--text-base);
+    transition: background var(--transition-fast), transform var(--transition-fast);
   }
 
-  .btn-send:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-send:hover:not(:disabled) {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+  }
+
   .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

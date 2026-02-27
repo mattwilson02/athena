@@ -88,6 +88,15 @@ class ChatStore:
         self._write(session)
         return True
 
+    def rename_session(self, session_id: str, title: str) -> bool:
+        """Rename a session. Returns False if not found."""
+        session = self._read(session_id)
+        if session is None:
+            return False
+        session["title"] = title
+        self._write(session)
+        return True
+
     def delete_session(self, session_id: str) -> bool:
         """Delete a session file. Returns False if not found."""
         path = self._session_path(session_id)
@@ -116,3 +125,22 @@ class ChatStore:
             {"role": m["role"], "content": m["content"]}
             for m in session.get("messages", [])
         ]
+
+    def get_session_node_ids(self, session_id: str) -> set[str]:
+        """Return set of all node IDs from graph_updates in this session."""
+        session = self._read(session_id)
+        if session is None:
+            return set()
+        node_ids: set[str] = set()
+        for m in session.get("messages", []):
+            for u in m.get("graph_updates", []):
+                nid = u.get("node_id")
+                if nid:
+                    node_ids.add(nid)
+                src = u.get("source")
+                tgt = u.get("target")
+                if src:
+                    node_ids.add(src)
+                if tgt:
+                    node_ids.add(tgt)
+        return node_ids
