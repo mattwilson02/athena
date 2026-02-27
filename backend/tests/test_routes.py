@@ -105,7 +105,7 @@ class TestChatRoutes:
         assert resp.get_json()["id"] == sid
 
     def test_get_session_not_found(self, client):
-        resp = client.get("/api/chat/sessions/nonexistent")
+        resp = client.get("/api/chat/sessions/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
 
     def test_delete_session(self, client):

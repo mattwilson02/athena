@@ -1,0 +1,25 @@
+# Athena Configuration
+# NOTE: No secrets in this file. Tokens live in deployment/secrets/auth_tokens.yaml
+
+auth:
+  protect_reads: false           # Set true to require auth on GET endpoints (recommended for Phase 3+)
+
+# User permissions — which endpoint groups each user can access
+users:
+  web_ui:
+    endpoints: ["*"]             # Full access (chat, vault, graph, insights)
+  n8n:
+    endpoints: ["chat", "vault"] # Chat + write (no graph browsing)
+  whatsapp:
+    endpoints: ["chat"]          # Chat only — no vault writes, no graph reads
+
+# Claude API routing
+claude:
+  base_url: null                 # null = direct API. Set to OpenClaw gateway URL in Phase 2.
+  fallback_url: "https://api.anthropic.com"
+  model: "claude-sonnet-4-20250514"
+
+# Audit
+audit:
+  log_path: "/logs/audit.log"
+  log_reads: false               # Only log write operations by default

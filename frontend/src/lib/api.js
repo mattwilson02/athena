@@ -1,6 +1,12 @@
 const BASE = '/api';
 
+function getAuthHeaders() {
+  const token = localStorage.getItem('athena_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+}
+
 async function fetchJSON(url, options = {}) {
+  options.headers = { ...getAuthHeaders(), ...options.headers };
   const res = await fetch(url, options);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -57,7 +63,7 @@ export function streamMessage(sessionId, message, { onText, onDone, onError }) {
   const controller = new AbortController();
   fetch(`${BASE}/chat/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId, message }),
     signal: controller.signal,
   })

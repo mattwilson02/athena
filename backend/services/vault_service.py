@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 
 import yaml
+
+from middleware.security import safe_resolve
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +59,9 @@ class VaultService:
         if not folder:
             return {"error": f"Unknown type '{node_type}' and no folder provided", "status": 400}
 
-        if ".." in folder or folder.startswith("/"):
+        try:
+            safe_resolve(Path(self.vault_path), folder)
+        except ValueError:
             return {"error": "Invalid folder path", "status": 400}
 
         # Ensure frontmatter has core fields

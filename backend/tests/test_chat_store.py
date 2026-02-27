@@ -26,7 +26,7 @@ class TestSessionCRUD:
         assert loaded["id"] == session["id"]
 
     def test_get_session_not_found(self, chat_store):
-        assert chat_store.get_session("nonexistent-id") is None
+        assert chat_store.get_session("00000000-0000-0000-0000-000000000000") is None
 
     def test_delete_session(self, chat_store):
         session = chat_store.create_session()
@@ -34,7 +34,7 @@ class TestSessionCRUD:
         assert chat_store.get_session(session["id"]) is None
 
     def test_delete_session_not_found(self, chat_store):
-        assert chat_store.delete_session("nonexistent") is False
+        assert chat_store.delete_session("00000000-0000-0000-0000-000000000000") is False
 
     def test_rename_session(self, chat_store):
         session = chat_store.create_session()
@@ -43,7 +43,7 @@ class TestSessionCRUD:
         assert loaded["title"] == "Custom Title"
 
     def test_rename_session_not_found(self, chat_store):
-        assert chat_store.rename_session("nonexistent", "Title") is False
+        assert chat_store.rename_session("00000000-0000-0000-0000-000000000000", "Title") is False
 
 
 class TestListSessions:
@@ -116,7 +116,7 @@ class TestMessages:
         assert len(loaded["messages"][0]["graph_updates"]) == 1
 
     def test_append_message_not_found(self, chat_store):
-        ok = chat_store.append_message("nonexistent", {"role": "user", "content": "test"})
+        ok = chat_store.append_message("00000000-0000-0000-0000-000000000000", {"role": "user", "content": "test"})
         assert ok is False
 
     def test_get_messages_for_api(self, chat_store):
@@ -152,7 +152,7 @@ class TestDismiss:
         assert loaded["dismissed_updates"].count("key") == 1
 
     def test_dismiss_not_found(self, chat_store):
-        assert chat_store.dismiss_update("nonexistent", "key") is False
+        assert chat_store.dismiss_update("00000000-0000-0000-0000-000000000000", "key") is False
 
 
 class TestSessionNodeIds:
@@ -175,4 +175,4 @@ class TestSessionNodeIds:
         assert chat_store.get_session_node_ids(session["id"]) == set()
 
     def test_get_session_node_ids_not_found(self, chat_store):
-        assert chat_store.get_session_node_ids("nonexistent") == set()
+        assert chat_store.get_session_node_ids("00000000-0000-0000-0000-000000000000") == set()

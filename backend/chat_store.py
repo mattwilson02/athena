@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 import logging
 from datetime import datetime, timezone
+
+# Valid session IDs: UUID format or wa-<hex> prefix (Phase 3)
+_SESSION_ID_RE = re.compile(r"^(wa-)?[a-f0-9-]+$")
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +23,8 @@ class ChatStore:
         os.makedirs(store_dir, exist_ok=True)
 
     def _session_path(self, session_id: str) -> str:
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(f"Invalid session ID format: {session_id}")
         return os.path.join(self.store_dir, f"{session_id}.json")
 
     def _read(self, session_id: str) -> dict | None:
