@@ -67,15 +67,27 @@ athena/
 │   ├── index.html
 │   ├── vite.config.js
 │   └── package.json
+├── deployment/
+│   ├── config/config.yaml        # App config (auth, users, Telegram, Claude model)
+│   ├── secrets/                  # Auth tokens, API key, proxy auth (never commit)
+│   ├── nginx/nginx.conf          # Reverse proxy config
+│   └── n8n/                      # n8n automation (Telegram ↔ Athena bridge)
+│       ├── docker-compose.yml    # Separate n8n service
+│       ├── workflow.json         # Importable workflow backup
+│       └── .env                  # n8n encryption key
 ├── docs/
 │   ├── ARCHITECTURE.md           # Technical deep-dive
+│   ├── V5_SPEC.md                # V5 spec (containerisation, auth, Telegram)
 │   └── archive/                  # Historical specs (V1, V2, V4, TEST_PLAN)
+├── docker-compose.yml            # Production: proxy + frontend + backend
 ├── SOUL.md                       # Athena's identity, voice, values, boundaries
 ├── README.md                     # Project overview + quick start
 └── CLAUDE.md                     # This file
 ```
 
-## Running Locally
+## Running
+
+### Dev Mode (bare processes)
 
 ```bash
 # Backend (requires ANTHROPIC_API_KEY in backend/.env)
@@ -84,6 +96,28 @@ cd backend && python3 server.py    # runs on port 5001
 # Frontend
 cd frontend && npm run dev         # runs on port 5173
 ```
+
+### Production (Docker)
+
+```bash
+docker compose up --build          # proxy on :8080, backend + frontend internal
+```
+
+Three-container architecture: nginx reverse proxy (`:8080`) → Svelte frontend + Flask backend on an internal Docker network. Backend also on a gateway network for Claude API access.
+
+| Container | Networks | Published ports |
+|-----------|----------|-----------------|
+| `athena-proxy` | proxy-net, athena-net | `127.0.0.1:8080:80` |
+| `athena-frontend` | athena-net | None (fully isolated) |
+| `athena` | athena-net, gateway-net | None |
+
+### Telegram Bot (n8n)
+
+```bash
+cd deployment/n8n && N8N_DOMAIN=<tunnel-domain> docker compose up -d
+```
+
+n8n bridges Telegram ↔ Athena via a 3-node workflow: Telegram Trigger → HTTP Request (`/api/chat/simple`) → Send Message. Requires a Cloudflare tunnel for webhook delivery.
 
 Note: On macOS with system Python 3.9, all backend files use `from __future__ import annotations` for modern type hint syntax. Flask runs on port **5001** (macOS AirPlay conflict on 5000).
 
@@ -97,7 +131,22 @@ Key points for development:
 - 7 domains, 27 types — never hardcode, always derive from schema
 - Wikilinks under `## Section` headings define edge types (see ARCHITECTURE.md for full mapping)
 
+## Authentication & Permissions
+
+All API endpoints require a bearer token (`Authorization: Bearer <token>`). Tokens and user mappings live in `deployment/secrets/auth_tokens.yaml`. Permissions are configured in `deployment/config/config.yaml`:
+
+| User | Endpoints | Use case |
+|------|-----------|----------|
+| `web_ui` | `*` (all) | Browser frontend |
+| `n8n` | `chat`, `vault` | n8n automation |
+| `telegram` | `chat` | Telegram bot (chat only) |
+
+Telegram sessions use a **chat ID allowlist** — only IDs listed in `config.yaml` under `telegram.allowed_chat_ids` can use the bot. Unknown senders get 403.
+
 ## API Endpoints
+
+### Health
+- `GET /api/health` — health check (used by Docker healthchecks)
 
 ### Chat
 - `GET /api/chat/sessions` — list sessions

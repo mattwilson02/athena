@@ -11,7 +11,15 @@ chat_bp = Blueprint("chat", __name__)
 
 @chat_bp.route("/api/chat/sessions", methods=["GET"])
 def list_sessions():
-    return jsonify({"sessions": current_app.config["chat_store"].list_sessions()})
+    sessions = current_app.config["chat_store"].list_sessions()
+    # Exclude Telegram sessions from desktop UI by default
+    source = request.args.get("source", "desktop")
+    if source == "desktop":
+        sessions = [s for s in sessions if not s["id"].startswith("tg-")]
+    elif source == "telegram":
+        sessions = [s for s in sessions if s["id"].startswith("tg-")]
+    # source=all returns everything
+    return jsonify({"sessions": sessions})
 
 
 @chat_bp.route("/api/chat/sessions", methods=["POST"])

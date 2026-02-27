@@ -20,16 +20,13 @@
 - At minimum: export the current workflow and commit it so it's recoverable
 
 ## Telegram Security Review
-- WhatsApp had HMAC-SHA256 webhook verification + timestamp freshness — we dropped all of that
-- Current Telegram security:
-  - Bot token is secret (stored in n8n creds, not in code)
-  - n8n webhook URL contains a random path (hard to guess)
-  - Bearer token auth on Athena's /api/chat/simple endpoint
-- Missing / to evaluate:
-  - **Chat ID allowlist** — restrict bot to only your Telegram user ID (currently anyone who finds the bot can talk to it)
-  - **Rate limiting** — no per-session rate limit on the simple endpoint
-  - **Webhook secret token** — Telegram supports `secret_token` header on webhooks (setWebhook param), n8n may not expose this
-- Priority: chat ID allowlist is the big one — add your ID (1936233108) to config and reject others
+- ~~Chat ID allowlist~~ Done — 403 for unknown IDs
+- Rate limiting — no per-session rate limit beyond max_session_messages cap
+- Webhook secret token — Telegram supports `secret_token` on webhooks, n8n may not expose this
+
+## Activity Feed
+- Nodes created/updated via Telegram confirm flow may not show in desktop activity until page refresh
+- Frontend should auto-refresh activity after graph changes or poll periodically
 
 ## Graph Organisation
 - Node organisation not fully dialled — review how types/domains are categorised

@@ -97,6 +97,31 @@ class TestChatRoutes:
         data = resp.get_json()
         assert len(data["sessions"]) >= 1
 
+    def test_get_sessions_excludes_telegram_by_default(self, client):
+        """Desktop UI should not see tg-* sessions."""
+        # Create a desktop session
+        client.post("/api/chat/sessions")
+        # Create a Telegram session via simple chat
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-1234567890",
+            "message": "Hello",
+        })
+        resp = client.get("/api/chat/sessions")
+        data = resp.get_json()
+        tg_sessions = [s for s in data["sessions"] if s["id"].startswith("tg-")]
+        assert len(tg_sessions) == 0
+
+    def test_get_sessions_source_all(self, client):
+        """source=all returns both desktop and Telegram sessions."""
+        client.post("/api/chat/sessions")
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-1234567890",
+            "message": "Hello",
+        })
+        resp = client.get("/api/chat/sessions?source=all")
+        data = resp.get_json()
+        assert len(data["sessions"]) >= 2
+
     def test_get_session(self, client):
         create_resp = client.post("/api/chat/sessions")
         sid = create_resp.get_json()["id"]
@@ -400,3 +425,36 @@ class TestChatIdAllowlist:
             "message": "Hello",
         })
         assert resp.status_code == 200
+
+
+class TestSimpleChatMaxMessages:
+    """Max message cap on Telegram sessions."""
+
+    def test_max_messages_returns_429(self, app, client):
+        app.config["athena_config"] = {
+            "telegram": {"max_session_messages": 2},
+        }
+        # Send 2 messages to fill the cap
+        for _ in range(2):
+            client.post("/api/chat/simple", json={
+                "session_id": "tg-1001001001",
+                "message": "fill",
+            })
+        # Third should be rejected
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1001001001",
+            "message": "too many",
+        })
+        assert resp.status_code == 429
+
+
+class TestStreamingEndpoint:
+    """Basic tests for POST /api/chat/stream."""
+
+    def test_stream_missing_message(self, client):
+        resp = client.post("/api/chat/stream", json={"session_id": "abc"})
+        assert resp.status_code == 400
+
+    def test_stream_missing_session_id(self, client):
+        resp = client.post("/api/chat/stream", json={"message": "test"})
+        assert resp.status_code == 400

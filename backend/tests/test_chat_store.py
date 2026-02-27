@@ -245,3 +245,17 @@ class TestPendingUpdates:
     def test_session_id_validation_rejects_traversal(self, chat_store):
         with pytest.raises(ValueError):
             chat_store.get_or_create_session("../../etc/passwd")
+
+    def test_session_id_rejects_non_numeric_tg(self, chat_store):
+        """tg- prefix requires decimal digits, not hex."""
+        with pytest.raises(ValueError):
+            chat_store.get_or_create_session("tg-abcdef")
+
+    def test_session_id_rejects_empty_tg(self, chat_store):
+        with pytest.raises(ValueError):
+            chat_store.get_or_create_session("tg-")
+
+    def test_session_id_accepts_wa_hex(self, chat_store):
+        """wa- prefix accepts hex characters."""
+        session = chat_store.get_or_create_session("wa-abc123def456")
+        assert session["id"] == "wa-abc123def456"
