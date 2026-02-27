@@ -93,8 +93,8 @@ def chat_stream():
         try:
             for event_type, event_data in chat_service.stream_message(session_id, message):
                 yield f"data: {json.dumps({'type': event_type, **event_data})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        except Exception:
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Something went wrong. Try again.'})}\n\n"
 
     return Response(
         generate(),

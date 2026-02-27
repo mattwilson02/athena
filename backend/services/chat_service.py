@@ -48,6 +48,9 @@ class ChatService:
         except anthropic.APIError as e:
             logger.error(f"Claude API error: {e}")
             return {"error": "Something went wrong talking to Claude. Try again.", "status": 502}
+        except ConnectionError:
+            logger.error("Network error reaching Claude API")
+            return {"error": "Can't reach Claude right now. Check your connection.", "status": 503}
 
         # Post-process: dedup check on create proposals
         graph_updates = self._dedup_check(result["graph_updates"])
@@ -111,6 +114,9 @@ class ChatService:
         except anthropic.APIError as e:
             logger.error(f"Claude API error: {e}")
             yield ("error", {"error": "Something went wrong talking to Claude. Try again."})
+        except ConnectionError:
+            logger.error("Network error reaching Claude API")
+            yield ("error", {"error": "Can't reach Claude right now. Check your connection."})
 
     def _dedup_check(self, updates: list[dict]) -> list[dict]:
         """Annotate create actions with potential duplicate info."""

@@ -13,10 +13,8 @@ users:
   whatsapp:
     endpoints: ["chat"]          # Chat only — no vault writes, no graph reads
 
-# Claude API routing
+# Claude API
 claude:
-  base_url: null                 # null = direct API. Set to OpenClaw gateway URL in Phase 2.
-  fallback_url: "https://api.anthropic.com"
   model: "claude-sonnet-4-20250514"
 
 # Audit

@@ -15,6 +15,7 @@ from vault_parser import VaultParser
 from vault_graph import VaultGraph
 from vector_search import VectorIndex
 from mentor_agent import MentorAgent
+from claude_client import create_claude_client
 from chat_store import ChatStore
 from services.vault_service import VaultService
 from services.chat_service import ChatService
@@ -123,11 +124,18 @@ def create_app() -> Flask:
     logger.info(f"Booting Athena — vault at {vault_path}")
     rebuild_all()
 
+    # Claude client — single shared instance for all API calls
+    api_key = config.get("_secrets", {}).get("anthropic_api_key", "")
+    claude_client = create_claude_client(api_key)
+
+    # Hardening: clear the raw key from all accessible locations
+    config.get("_secrets", {}).pop("anthropic_api_key", None)
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+
     # Mentor agent
     mentor = None
-    api_key = config.get("_secrets", {}).get("anthropic_api_key", "")
-    if api_key:
-        mentor = MentorAgent(graph, vector_index, schema, vault_path=vault_path)
+    if claude_client:
+        mentor = MentorAgent(graph, vector_index, schema, vault_path=vault_path, client=claude_client)
         logger.info("Mentor agent ready")
     else:
         logger.warning("No API key — chat and insights endpoints disabled")
@@ -143,6 +151,7 @@ def create_app() -> Flask:
     app.config["vector_index"] = vector_index
     app.config["chat_store"] = chat_store
     app.config["mentor"] = mentor
+    app.config["claude_client"] = claude_client
     app.config["rebuild_fn"] = rebuild_all
     app.config["vault_service"] = vault_service
     app.config["chat_service"] = chat_service
@@ -166,7 +175,7 @@ def create_app() -> Flask:
     @app.errorhandler(Exception)
     def handle_error(e):
         logger.error(f"Unhandled error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
     return app
 

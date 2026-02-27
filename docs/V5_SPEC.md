@@ -85,7 +85,7 @@ athena-net (internal: true)     ← all three services communicate here
     └── athena                  ← also on gateway-net for Claude API
 
 gateway-net (bridge)            ← backend reaches internet/host
-    └── athena                  ← Claude API + OpenClaw (Phase 2)
+    └── athena                  ← Claude API (direct)
 ```
 
 | Container | Networks | Can reach internet? | Published ports |
@@ -96,7 +96,7 @@ gateway-net (bridge)            ← backend reaches internet/host
 
 **How `internal: true` works:** Docker Desktop for Mac blocks port publishing on internal networks. To solve this, only the nginx reverse proxy bridges between the host-facing `proxy-net` (standard bridge) and the isolated `athena-net` (internal). The backend and frontend never publish ports — they are only reachable through the proxy on the internal network.
 
-**Why the backend needs `gateway-net`:** The backend calls the Claude API directly (Phase 1) or via OpenClaw on `host.docker.internal:18789` (Phase 2). Both require outbound network access. The `gateway-net` bridge network provides this without exposing the backend to the host's published ports.
+**Why the backend needs `gateway-net`:** The backend calls the Claude API directly at `api.anthropic.com`. This requires outbound network access. The `gateway-net` bridge network provides this without exposing the backend to the host's published ports.
 
 **Frontend is fully isolated:** The frontend container serves static files and has no outbound network access. Even if the nginx process inside were compromised, the attacker can only reach other containers on `athena-net` — not the internet, not the host, nothing else.
 
@@ -104,7 +104,7 @@ gateway-net (bridge)            ← backend reaches internet/host
 
 **Layer 2: Host firewall** — restricts which host ports the backend can reach via `gateway-net`.
 
-`host.docker.internal` resolves to the host machine. The backend on `gateway-net` can reach **any port** listening on the host — not just OpenClaw on 18789.
+`host.docker.internal` resolves to the host machine. The backend on `gateway-net` can reach **any port** listening on the host — not just the Claude API.
 
 **macOS Docker Desktop reality:** Docker Desktop runs containers inside a lightweight Linux VM. Container traffic to `host.docker.internal` traverses the VM boundary via `com.docker.backend`, not through the macOS `lo0` loopback interface. This means **macOS pf rules on `lo0` may not intercept container traffic**. The pf rules below are still worth applying (they protect against non-Docker local traffic), but they are not a reliable sole defence.
 
@@ -114,8 +114,9 @@ gateway-net (bridge)            ← backend reaches internet/host
 
 ```bash
 # Add to /etc/pf.conf or a separate anchor file
+# Block all container traffic to host loopback by default
 block drop quick on lo0 proto tcp from 172.16.0.0/12 to 127.0.0.1
-pass quick on lo0 proto tcp from 172.16.0.0/12 to 127.0.0.1 port 18789  # OpenClaw gateway
+# No pass rules needed — Claude API is reached via the internet, not via the host
 ```
 
 **After all layers**, the containers cannot:
@@ -125,47 +126,6 @@ pass quick on lo0 proto tcp from 172.16.0.0/12 to 127.0.0.1 port 18789  # OpenCl
 - **Backend:** Publish ports to the host (no port mapping), but CAN reach internet via `gateway-net` (required for Claude API)
 
 **Accepted risk:** The backend can reach the internet via `gateway-net` — this is necessary for Claude API calls. The frontend and proxy are fully isolated. The backend's outbound access is limited to what the application code does (Claude API calls only). If the backend were compromised, `gateway-net` provides an exfiltration path — but the backend runs our own code as a non-root user with all capabilities dropped.
-
-### OpenClaw Trust Model
-
-**OpenClaw is the weakest link in this architecture.** Everything else is either our own code or well-established infrastructure (Docker, Cloudflare, n8n). OpenClaw is a third-party npm package running natively on the host with full host-level access and no sandboxing.
-
-**What OpenClaw is:** A transparent HTTP proxy that routes Claude API calls through a Claude subscription instead of per-token billing. It runs on the host (not in the container) as a Node.js process.
-
-**What it can see:** Every prompt sent to Claude — your goals, fears, finances, relationships, the entire knowledge graph context. This is a **new trust boundary**, not the same as before. Previously, data went directly from your machine to Anthropic over HTTPS. Now it passes through an intermediary process that has full host access.
-
-**What a compromised OpenClaw could do:**
-- Exfiltrate prompt content silently (it handles all API traffic)
-- Read any file on the host (it runs as your user, unsandboxed)
-- Modify prompts or responses in transit
-- Phone home (it has full network access)
-
-**Mitigations:**
-
-| Control | Why |
-|---------|-----|
-| Pin to exact version (`openclaw@X.Y.Z`, never `@latest`) | Prevents malicious updates from auto-installing |
-| Audit source before install | Verify the npm package matches the published source |
-| Check for telemetry | Confirm it doesn't phone home (`lsof -i` after install) |
-| Dedicated `openclaw` system user | Runs under a restricted user with its own home dir — cannot read your files, SSH keys, or other repos even if compromised |
-| Host outbound firewall | Restrict OpenClaw's outbound to Anthropic endpoints only (e.g. LuLu, Little Snitch, or pf rules) — blocks silent exfiltration to other destinations |
-| Loopback binding only (`127.0.0.1:18789`) | Not reachable from the network |
-| Fallback to direct API | If OpenClaw is suspect, set `claude.base_url: null` and revert instantly |
-
-**Host setup for dedicated user:**
-```bash
-# Create restricted openclaw user (no shell login, own home dir)
-sudo dscl . -create /Users/openclaw
-sudo dscl . -create /Users/openclaw UserShell /usr/bin/false
-sudo dscl . -create /Users/openclaw NFSHomeDirectory /var/lib/openclaw
-sudo mkdir -p /var/lib/openclaw && sudo chown openclaw /var/lib/openclaw
-
-# Install and run OpenClaw as that user
-sudo -u openclaw npm install -g openclaw@X.Y.Z
-sudo -u openclaw openclaw gateway start
-```
-
-**Accepted risk:** We're trusting OpenClaw with prompt content in exchange for subscription-based billing. This is a conscious trade-off. The mitigations reduce the attack surface but don't eliminate it — if the OpenClaw project is compromised, our prompts are exposed. Running under a dedicated user limits the blast radius to OpenClaw's own data and Anthropic credentials. The direct API fallback means we can cut OpenClaw out instantly if trust is lost.
 
 ### Authentication & Permissions
 
@@ -271,7 +231,7 @@ The two moderate findings (session ID validation + folder path check) are addres
 ## Phase Order
 
 ```
-Phase 1: Containerise + Harden ──→ Phase 2: OpenClaw ──→ Phase 3: n8n + WhatsApp
+Phase 1: Containerise + Harden ──→ Phase 2: Client Refactor + Key Hardening ──→ Phase 3: n8n + WhatsApp
 ```
 
 Each phase is independently deployable and testable. Phase 1 is the foundation.
@@ -679,50 +639,35 @@ Run Flask bare: `cd backend && python3 server.py`. Vault files are bind-mounted 
 
 ---
 
-## Phase 2: OpenClaw Integration
+## Phase 2: Client Refactor + API Key Hardening
 
 ### Goal
 
-Route all Claude API calls through OpenClaw gateway, using Claude subscription instead of per-token billing. Streaming, sync, insights, and suggest-links all go through the same path.
+Consolidate all Claude API access through a shared client factory. Harden API key handling — remove the key from `os.environ` and `config` after boot, sanitize error messages, and restrict `gateway-net` egress.
 
-### How It Works
+### Why Not OpenClaw
 
-```
-Athena container (port 5001)
-    │
-    │  Anthropic Python SDK with custom base_url
-    ▼
-host.docker.internal:18789 ─── OpenClaw gateway (native on host, launchd)
-    │
-    │  HTTPS
-    ▼
-Claude API (billed to subscription, not per-token)
-```
+OpenClaw was originally planned as a subscription billing proxy. After investigation, it was found to be architecturally incompatible with Athena:
 
-The Anthropic Python SDK supports a `base_url` parameter on `anthropic.Anthropic()`. Both `messages.create()` and `messages.stream()` use the same HTTP transport, so streaming works unchanged when routed through a gateway.
+- **Dynamic system prompts** — Athena builds fresh context per message (semantic search + 2-hop graph traversal + session boosting). OpenClaw caches system prompts per-session — stale context after the first message.
+- **Streaming** — OpenClaw CLI is synchronous only. SSE streaming (core UX feature) would be lost.
+- **Agent ownership** — OpenClaw owns the agent loop. Athena's custom retrieval pipeline, prompt engineering, and graph-aware context would need to be abandoned or awkwardly shoehorned in.
+- **Cost math** — API tokens at personal usage (500-1000 msgs/month) cost ~$5-35/month. Claude Max subscription ($100-200/month) is more expensive, not less.
 
-### Host Setup (not containerised — OpenClaw is infrastructure)
+Athena's purpose-built agent outperforms a generic runtime for knowledge graph use cases. Direct Anthropic SDK access preserves streaming, per-message context, and immediate access to new SDK features.
 
-```bash
-# Requires Node 22+
-# IMPORTANT: Pin to exact version — never use @latest
-# Check current version at https://www.npmjs.com/package/openclaw
-npm install -g openclaw@X.Y.Z
+### Current Problem
 
-# Verify package integrity after install
-npm ls -g openclaw               # Confirm installed version
-lsof -i -P | grep openclaw       # Confirm no unexpected network connections
+4 separate Claude API touchpoints, each creating their own client:
 
-# Authenticate with Claude subscription
-openclaw models auth paste-token --provider anthropic
+| Location | How client is created |
+|----------|----------------------|
+| `mentor_agent.py:356` | `anthropic.Anthropic()` in `__init__` |
+| `insights_routes.py:40` | `anthropic.Anthropic()` per request |
+| `graph_routes.py:181` | `anthropic.Anthropic()` per request |
+| `chat_service.py` | No client — catches errors from mentor |
 
-# Start gateway (registers launchd service)
-openclaw gateway start    # Binds to 127.0.0.1:18789
-
-# Verify
-openclaw health
-curl http://localhost:18789/api/health
-```
+All rely on `ANTHROPIC_API_KEY` env var. The key sits in 3 places in memory (`os.environ`, `config["_secrets"]`, `app.config`). Raw exception messages are sent to clients, risking accidental key leakage.
 
 ### New Files
 
@@ -731,69 +676,63 @@ curl http://localhost:18789/api/health
 Shared client factory — single source of truth for all Claude API access.
 
 ```python
-"""Shared Claude client with OpenClaw gateway support and fallback."""
+"""Shared Claude client factory — single source of truth for all Claude API access."""
+from __future__ import annotations
 
 import logging
 import anthropic
 
 logger = logging.getLogger(__name__)
 
-def create_claude_client(config: dict) -> anthropic.Anthropic | None:
-    """Create an Anthropic client, routing through OpenClaw if configured."""
-    claude_config = config.get("claude", {})
-    base_url = claude_config.get("base_url")
-    api_key = config.get("_secrets", {}).get("anthropic_api_key", "")
-
-    if base_url:
-        logger.info(f"Claude client via gateway: {base_url}")
-        return anthropic.Anthropic(
-            base_url=base_url,
-            api_key=api_key or "openclaw-gateway",
-        )
-
-    # Direct API fallback
+def create_claude_client(api_key: str) -> anthropic.Anthropic | None:
+    """Create an Anthropic client with explicit key. Returns None if no key."""
     if not api_key:
-        logger.error("No Claude API key and no gateway configured — Claude disabled")
+        logger.error("No Claude API key — Claude disabled")
         return None
 
-    fallback = claude_config.get("fallback_url", "https://api.anthropic.com")
-    logger.info(f"Claude client via direct API: {fallback}")
-    return anthropic.Anthropic(base_url=fallback, api_key=api_key)
+    logger.info("Claude client ready (direct API)")
+    return anthropic.Anthropic(api_key=api_key)
 ```
 
 ### Modified Files
 
 | File | Change |
 |------|--------|
-| `server.py` | Import `create_claude_client`, create shared client at boot, pass to MentorAgent, store on `app.config["claude_client"]` |
-| `mentor_agent.py` | Accept injected `client` parameter in `__init__` instead of creating `anthropic.Anthropic()` (currently line 356). Remove self-initialisation. |
-| `insights_routes.py` | Replace standalone `client = anthropic.Anthropic()` (line 40) with `current_app.config["claude_client"]`. Add null check → 503. |
-| `graph_routes.py` | Replace standalone `client = anthropic.Anthropic()` (line 181) with `current_app.config["claude_client"]`. Add null check → 503. |
-| `chat_service.py` | Add `ConnectionError` / `httpx.ConnectError` handling for gateway being down. |
-| `config.yaml` | Set `claude.base_url: "http://host.docker.internal:18789"` |
+| `server.py` | Import `create_claude_client`. Create shared client at boot with explicit key. Pass to MentorAgent. Store on `app.config["claude_client"]`. Clear key from `os.environ` and `config["_secrets"]` after client creation. |
+| `mentor_agent.py` | Accept injected `client` parameter in `__init__` instead of creating `anthropic.Anthropic()`. Remove self-initialisation. |
+| `insights_routes.py` | Replace standalone `client = anthropic.Anthropic()` with `current_app.config["claude_client"]`. Add null check → 503. |
+| `graph_routes.py` | Replace standalone `client = anthropic.Anthropic()` with `current_app.config["claude_client"]`. Add null check → 503. |
+| `chat_service.py` | Add `ConnectionError` handling for network issues. |
+| `server.py` (error handlers) | Replace `str(e)` in client-facing error responses with generic messages. Keep detailed logging server-side. |
+| `chat_routes.py` (error handlers) | Same — generic error messages to client, detailed logs server-side. |
 
-### Security
+### API Key Hardening
 
-- OpenClaw gateway bound to loopback only (`127.0.0.1:18789`) — not exposed to network
-- Container accesses it via Docker's `host.docker.internal` bridge
-- No Anthropic API key stored in the container once OpenClaw is primary
-- Subscription credential lives only in `~/.openclaw/openclaw.json` on host
-- Gateway health checked before first API call
+After the shared client is created at boot, the raw API key string is removed from all accessible locations:
+
+```python
+# server.py — after creating claude_client
+del os.environ["ANTHROPIC_API_KEY"]              # Remove from /proc/1/environ
+config.get("_secrets", {}).pop("anthropic_api_key", None)  # Remove from config dict
+```
+
+The key now lives only inside the `anthropic.Anthropic` client object (which holds it as an internal attribute). An attacker with code execution can no longer read it from `os.environ` or `config`.
+
+Error handlers sanitized — raw `str(e)` replaced with generic messages in all client-facing responses. Detailed errors logged server-side only.
 
 ### Verification Checklist
 
-- [ ] `openclaw health` shows gateway running
-- [ ] Chat message works — logs show `"Claude client via gateway"`
-- [ ] Streaming (`/api/chat/stream`) returns SSE tokens through the gateway
-- [ ] Insights (`GET /api/insights`) returns analysis through the gateway
-- [ ] Suggest-links (`POST /api/graph/suggest-links`) works through the gateway
-- [ ] Stop gateway → next message returns graceful error (not crash)
-- [ ] Restart gateway → works again immediately
-- [ ] No `ANTHROPIC_API_KEY` present in container env (`docker exec athena env | grep ANTHROP`)
+- [ ] Chat message works (streaming + sync)
+- [ ] Insights (`GET /api/insights`) returns analysis
+- [ ] Suggest-links (`POST /api/graph/suggest-links`) works
+- [ ] `docker exec athena env | grep ANTHROP` returns nothing (key cleared from env)
+- [ ] `docker exec athena python -c "import os; print(os.environ.get('ANTHROPIC_API_KEY'))"` returns `None`
+- [ ] Trigger a server error → client sees "Internal server error", not a raw exception
+- [ ] All 118 tests still pass locally (dev mode unaffected)
 
 ### Rollback
 
-Set `claude.base_url: null` in `config.yaml` → reverts to direct API using key from `deployment/secrets/anthropic_api_key.txt`. Single config change, no code changes.
+Revert the 6 modified files. The key loading path (`_load_secrets`) is unchanged — only the post-boot cleanup and client injection are new.
 
 ---
 
@@ -1009,7 +948,7 @@ n8n is in a separate docker-compose — stop it without touching Athena. Disable
 | Phase | New Files | Modified Files |
 |-------|-----------|---------------|
 | 1 | `backend/Dockerfile`, `frontend/Dockerfile`, `frontend/nginx.conf`, `frontend/.dockerignore`, `deployment/nginx/nginx.conf`, `docker-compose.yml`, `deployment/config/config.yaml`, `deployment/secrets/`, `backend/middleware/{__init__,auth,audit,security}.py` | `server.py`, `vault_service.py`, `chat_store.py`, `api.js`, `.gitignore` |
-| 2 | `backend/claude_client.py` | `server.py`, `mentor_agent.py`, `insights_routes.py`, `graph_routes.py`, `chat_service.py`, `config.yaml` |
+| 2 | `backend/claude_client.py` | `server.py`, `mentor_agent.py`, `insights_routes.py`, `graph_routes.py`, `chat_service.py`, `chat_routes.py` |
 | 3 | `deployment/n8n/docker-compose.yml`, n8n workflow (JSON export), new secrets | `chat_store.py`, `chat_routes.py`, `config.yaml` |
 
 ---
@@ -1017,7 +956,6 @@ n8n is in a separate docker-compose — stop it without touching Athena. Disable
 ## Open Questions
 
 - WhatsApp Business: virtual number (can't share personal number — it deregisters from regular WhatsApp)
-- Node 22 available on this machine? (required for OpenClaw)
 
 ---
 
