@@ -28,6 +28,13 @@
 - Nodes created/updated via Telegram confirm flow may not show in desktop activity until page refresh
 - Frontend should auto-refresh activity after graph changes or poll periodically
 
+## Telegram/Desktop Session Separation — CONFIRMED BUG
+- Session list filtering (source=desktop) is implemented but not verified end-to-end
+- Telegram messages may still appear in desktop chat view — needs investigation
+- Check: is the frontend actually calling /api/chat/sessions without source param? (it should default to desktop)
+- Check: are tg-* sessions showing in the sidebar, or are messages leaking into desktop sessions?
+- Docker container needs rebuild to pick up the session filtering change
+
 ## Graph Organisation
 - Node organisation not fully dialled — review how types/domains are categorised
 - Review cross-referencing quality
