@@ -90,7 +90,7 @@
 
 {#if connectionError}
   <div class="error-banner">
-    Backend not reachable. Make sure the server is running on port 5001.
+    Backend not reachable. Check the server is running and your auth token is set.
   </div>
 {/if}
 

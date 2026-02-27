@@ -1,0 +1,31 @@
+# Athena Configuration
+# NOTE: No secrets in this file. Tokens live in deployment/secrets/auth_tokens.yaml
+
+auth:
+  protect_reads: true            # All API endpoints require auth (Phase 3)
+
+# User permissions — which endpoint groups each user can access
+users:
+  web_ui:
+    endpoints: ["*"]             # Full access (chat, vault, graph, insights)
+  n8n:
+    endpoints: ["chat", "vault"] # Chat + write (no graph browsing)
+  telegram:
+    endpoints: ["chat"]          # Chat only — no vault writes, no graph reads
+
+# Claude API
+claude:
+  model: "claude-sonnet-4-20250514"
+
+# Telegram channel settings
+telegram:
+  max_response_length: 4096      # Telegram message character limit
+  session_prefix: "tg-"          # Session ID prefix for Telegram sessions
+  max_session_messages: 200      # Auto-cap to prevent runaway sessions
+  allowed_chat_ids:              # Only these Telegram users can talk to the bot
+    - 1936233108
+
+# Audit
+audit:
+  log_path: "/logs/audit.log"
+  log_reads: false               # Only log write operations by default

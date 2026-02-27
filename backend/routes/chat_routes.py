@@ -11,7 +11,15 @@ chat_bp = Blueprint("chat", __name__)
 
 @chat_bp.route("/api/chat/sessions", methods=["GET"])
 def list_sessions():
-    return jsonify({"sessions": current_app.config["chat_store"].list_sessions()})
+    sessions = current_app.config["chat_store"].list_sessions()
+    # Exclude Telegram sessions from desktop UI by default
+    source = request.args.get("source", "desktop")
+    if source == "desktop":
+        sessions = [s for s in sessions if not s["id"].startswith("tg-")]
+    elif source == "telegram":
+        sessions = [s for s in sessions if s["id"].startswith("tg-")]
+    # source=all returns everything
+    return jsonify({"sessions": sessions})
 
 
 @chat_bp.route("/api/chat/sessions", methods=["POST"])
@@ -75,6 +83,39 @@ def chat():
     return jsonify(result)
 
 
+@chat_bp.route("/api/chat/simple", methods=["POST"])
+def chat_simple():
+    """Non-streaming chat for Telegram/n8n. Auto-creates session, handles confirm/dismiss."""
+    data = request.json
+    if not data or not data.get("message", "").strip():
+        return jsonify({"error": "message is required"}), 400
+
+    session_id = data.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+
+    config = current_app.config.get("athena_config", {})
+    tg_config = config.get("telegram", {})
+    max_messages = tg_config.get("max_session_messages", 200)
+
+    # Chat ID allowlist — reject unknown Telegram users
+    if session_id.startswith("tg-"):
+        allowed = tg_config.get("allowed_chat_ids", [])
+        if allowed:
+            chat_id = session_id[3:]  # strip "tg-" prefix
+            if int(chat_id) not in allowed:
+                return jsonify({"error": "Unauthorized chat ID"}), 403
+
+    result = current_app.config["chat_service"].send_simple_message(
+        session_id, data["message"], max_messages=max_messages
+    )
+
+    status = result.pop("status", 200)
+    if "error" in result:
+        return jsonify(result), status
+    return jsonify(result)
+
+
 @chat_bp.route("/api/chat/stream", methods=["POST"])
 def chat_stream():
     data = request.json
@@ -93,8 +134,8 @@ def chat_stream():
         try:
             for event_type, event_data in chat_service.stream_message(session_id, message):
                 yield f"data: {json.dumps({'type': event_type, **event_data})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        except Exception:
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Something went wrong. Try again.'})}\n\n"
 
     return Response(
         generate(),

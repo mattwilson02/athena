@@ -12,11 +12,12 @@ logger = logging.getLogger(__name__)
 class ChatService:
     """Orchestrates chat flow: session → mentor → dedup → save."""
 
-    def __init__(self, chat_store, mentor, graph, vector_index):
+    def __init__(self, chat_store, mentor, graph, vector_index, vault_service=None):
         self.chat_store = chat_store
         self.mentor = mentor
         self.graph = graph
         self.vector_index = vector_index
+        self.vault_service = vault_service
 
     def send_message(self, session_id: str, message: str) -> dict:
         """Process a user message. Returns {response, graph_updates, relevant_nodes} or {error}."""
@@ -48,6 +49,9 @@ class ChatService:
         except anthropic.APIError as e:
             logger.error(f"Claude API error: {e}")
             return {"error": "Something went wrong talking to Claude. Try again.", "status": 502}
+        except ConnectionError:
+            logger.error("Network error reaching Claude API")
+            return {"error": "Can't reach Claude right now. Check your connection.", "status": 503}
 
         # Post-process: dedup check on create proposals
         graph_updates = self._dedup_check(result["graph_updates"])
@@ -111,6 +115,135 @@ class ChatService:
         except anthropic.APIError as e:
             logger.error(f"Claude API error: {e}")
             yield ("error", {"error": "Something went wrong talking to Claude. Try again."})
+        except ConnectionError:
+            logger.error("Network error reaching Claude API")
+            yield ("error", {"error": "Can't reach Claude right now. Check your connection."})
+
+    def send_simple_message(self, session_id: str, message: str, max_messages: int = 200) -> dict:
+        """Non-streaming message for Telegram/n8n. Returns {response} or {error}.
+
+        Handles confirm/dismiss keywords before falling through to normal chat.
+        Appends a human-readable pending update prompt to the response text.
+        """
+        if self.mentor is None:
+            return {"error": "ANTHROPIC_API_KEY not configured", "status": 503}
+
+        # Auto-create session for Telegram (tg-* IDs)
+        session = self.chat_store.get_or_create_session(session_id)
+
+        # Message cap check
+        if max_messages and self.chat_store.message_count(session_id) >= max_messages:
+            return {"error": "Session message limit reached. Start a new conversation.", "status": 429}
+
+        # Check for confirm/dismiss keywords
+        keyword = message.strip().lower()
+        if keyword in ("yes", "confirm", "accept", "y"):
+            return self._confirm_pending(session_id)
+        if keyword in ("no", "decline", "skip", "n"):
+            return self._dismiss_pending(session_id)
+
+        # Normal chat flow (sync)
+        result = self.send_message(session_id, message)
+        if "error" in result:
+            return result
+
+        response_text = result["response"]
+        graph_updates = result.get("graph_updates", [])
+
+        # Queue pending updates and append confirmation prompt
+        if graph_updates:
+            self.chat_store.set_pending_updates(session_id, graph_updates)
+            first = graph_updates[0]
+            action = first.get("action", "create")
+            title = first.get("title", first.get("node_id", "unknown"))
+            node_type = first.get("type", "")
+            prompt = f"\n\n---\nPending: {action} \"{title}\" ({node_type})"
+            if len(graph_updates) > 1:
+                prompt += f" + {len(graph_updates) - 1} more"
+            prompt += "\nReply YES to save or NO to skip."
+            response_text += prompt
+
+        return {"response": response_text}
+
+    def _confirm_pending(self, session_id: str) -> dict:
+        """Accept the next pending graph update. Writes to vault."""
+        update = self.chat_store.pop_pending_update(session_id)
+        if update is None:
+            return {"response": "Nothing pending to confirm."}
+
+        if self.vault_service is None:
+            return {"error": "Vault service not available", "status": 500}
+
+        action = update.get("action", "create")
+        title = update.get("title", update.get("node_id", "unknown"))
+
+        if action == "create":
+            result = self.vault_service.write({
+                "node_id": update.get("node_id"),
+                "title": update.get("title"),
+                "type": update.get("type"),
+                "content": update.get("content", ""),
+                "frontmatter": update.get("frontmatter", {}),
+                "edges": update.get("edges", []),
+                "folder": update.get("folder"),
+            })
+        elif action == "update":
+            result = self.vault_service.update({
+                "node_id": update.get("node_id"),
+                "changes": update.get("changes", {}),
+            })
+        elif action == "link":
+            result = self.vault_service.update({
+                "node_id": update.get("source", update.get("node_id")),
+                "changes": {
+                    "add_edges": [{"target": update.get("target"), "type": update.get("edge_type", "relates_to")}],
+                },
+            })
+        else:
+            return {"response": f"Unknown action '{action}' — skipped."}
+
+        if result.get("error"):
+            return {"response": f"Failed to {action} \"{title}\": {result['error']}"}
+
+        # Check if more pending
+        remaining = self.chat_store.get_pending_updates(session_id)
+        reply = f"Saved: {action} \"{title}\""
+        if remaining:
+            nxt = remaining[0]
+            nxt_title = nxt.get("title", nxt.get("node_id", "unknown"))
+            nxt_type = nxt.get("type", "")
+            reply += f"\n\nNext: {nxt.get('action', 'create')} \"{nxt_title}\" ({nxt_type})"
+            if len(remaining) > 1:
+                reply += f" + {len(remaining) - 1} more"
+            reply += "\nReply YES to save or NO to skip."
+
+        return {"response": reply}
+
+    def _dismiss_pending(self, session_id: str) -> dict:
+        """Dismiss the next pending graph update."""
+        update = self.chat_store.pop_pending_update(session_id)
+        if update is None:
+            return {"response": "Nothing pending to dismiss."}
+
+        title = update.get("title", update.get("node_id", "unknown"))
+
+        # Dismiss it in the session record too
+        update_key = update.get("node_id", "")
+        if update_key:
+            self.chat_store.dismiss_update(session_id, update_key)
+
+        remaining = self.chat_store.get_pending_updates(session_id)
+        reply = f"Skipped: \"{title}\""
+        if remaining:
+            nxt = remaining[0]
+            nxt_title = nxt.get("title", nxt.get("node_id", "unknown"))
+            nxt_type = nxt.get("type", "")
+            reply += f"\n\nNext: {nxt.get('action', 'create')} \"{nxt_title}\" ({nxt_type})"
+            if len(remaining) > 1:
+                reply += f" + {len(remaining) - 1} more"
+            reply += "\nReply YES to save or NO to skip."
+
+        return {"response": reply}
 
     def _dedup_check(self, updates: list[dict]) -> list[dict]:
         """Annotate create actions with potential duplicate info."""

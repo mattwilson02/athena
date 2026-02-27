@@ -53,7 +53,7 @@ def app(tmp_vault, schema, graph):
     })
 
     vault_service = VaultService(str(tmp_vault), graph, vector_index, schema, rebuild)
-    chat_service = ChatService(chat_store, mentor, graph, vector_index)
+    chat_service = ChatService(chat_store, mentor, graph, vector_index, vault_service=vault_service)
 
     app.config["vault_path"] = str(tmp_vault)
     app.config["schema"] = schema
@@ -97,6 +97,31 @@ class TestChatRoutes:
         data = resp.get_json()
         assert len(data["sessions"]) >= 1
 
+    def test_get_sessions_excludes_telegram_by_default(self, client):
+        """Desktop UI should not see tg-* sessions."""
+        # Create a desktop session
+        client.post("/api/chat/sessions")
+        # Create a Telegram session via simple chat
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-1234567890",
+            "message": "Hello",
+        })
+        resp = client.get("/api/chat/sessions")
+        data = resp.get_json()
+        tg_sessions = [s for s in data["sessions"] if s["id"].startswith("tg-")]
+        assert len(tg_sessions) == 0
+
+    def test_get_sessions_source_all(self, client):
+        """source=all returns both desktop and Telegram sessions."""
+        client.post("/api/chat/sessions")
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-1234567890",
+            "message": "Hello",
+        })
+        resp = client.get("/api/chat/sessions?source=all")
+        data = resp.get_json()
+        assert len(data["sessions"]) >= 2
+
     def test_get_session(self, client):
         create_resp = client.post("/api/chat/sessions")
         sid = create_resp.get_json()["id"]
@@ -105,7 +130,7 @@ class TestChatRoutes:
         assert resp.get_json()["id"] == sid
 
     def test_get_session_not_found(self, client):
-        resp = client.get("/api/chat/sessions/nonexistent")
+        resp = client.get("/api/chat/sessions/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
 
     def test_delete_session(self, client):
@@ -258,4 +283,178 @@ class TestVaultRoutes:
 
     def test_vault_write_no_body(self, client):
         resp = client.post("/api/vault/write", content_type="application/json")
+        assert resp.status_code == 400
+
+
+# ── Simple Chat Routes (Phase 3) ────────────────────────────────────────
+
+
+class TestSimpleChatRoutes:
+    """POST /api/chat/simple — non-streaming chat for Telegram/n8n."""
+
+    def test_simple_chat(self, client):
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1936233108",
+            "message": "Hello Athena",
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "response" in data
+
+    def test_simple_chat_auto_creates_session(self, client):
+        """tg-* sessions are auto-created by send_simple_message."""
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-5551234567",
+            "message": "First message",
+        })
+        resp = client.get("/api/chat/sessions/tg-5551234567")
+        assert resp.status_code == 200
+
+    def test_simple_chat_missing_message(self, client):
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1936233108",
+        })
+        assert resp.status_code == 400
+
+    def test_simple_chat_missing_session_id(self, client):
+        resp = client.post("/api/chat/simple", json={
+            "message": "Hello",
+        })
+        assert resp.status_code == 400
+
+    def test_simple_chat_confirm_no_pending(self, client):
+        """Confirm keyword with nothing pending returns info message."""
+        # Create session first
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-1112223334",
+            "message": "Hello",
+        })
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1112223334",
+            "message": "yes",
+        })
+        assert resp.status_code == 200
+        assert "Nothing pending" in resp.get_json()["response"]
+
+    def test_simple_chat_dismiss_no_pending(self, client):
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-4445556667",
+            "message": "Hello",
+        })
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-4445556667",
+            "message": "no",
+        })
+        assert resp.status_code == 200
+        assert "Nothing pending" in resp.get_json()["response"]
+
+    def test_simple_chat_with_graph_updates_queues_pending(self, app, client):
+        """When mentor returns graph_updates, they become pending with a confirm prompt."""
+        mentor = app.config["mentor"]
+        mentor.chat.return_value = {
+            "response": "I see you want to learn guitar.",
+            "full_response": "I see you want to learn guitar.",
+            "graph_updates": [
+                {"action": "create", "node_id": "learn-guitar", "type": "goal", "title": "Learn Guitar"},
+            ],
+            "relevant_nodes": [],
+        }
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-7778889990",
+            "message": "I want to learn guitar",
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "YES" in data["response"]
+        assert "Learn Guitar" in data["response"]
+
+    def test_simple_chat_confirm_writes_to_vault(self, app, client, tmp_vault):
+        """Confirming a pending create writes the node to vault."""
+        mentor = app.config["mentor"]
+        mentor.chat.return_value = {
+            "response": "Adding a new goal.",
+            "full_response": "Adding a new goal.",
+            "graph_updates": [
+                {"action": "create", "node_id": "test-confirm", "type": "goal", "title": "Test Confirm"},
+            ],
+            "relevant_nodes": [],
+        }
+        # Send message that triggers a graph update
+        client.post("/api/chat/simple", json={
+            "session_id": "tg-8889990001",
+            "message": "Create a test goal",
+        })
+        # Confirm it
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-8889990001",
+            "message": "yes",
+        })
+        assert resp.status_code == 200
+        assert "Saved" in resp.get_json()["response"]
+        assert (tmp_vault / "Self" / "Goals" / "test-confirm.md").exists()
+
+
+class TestChatIdAllowlist:
+    """Telegram chat ID allowlist — reject unknown users."""
+
+    def test_allowed_chat_id_passes(self, app, client):
+        app.config["athena_config"] = {
+            "telegram": {"allowed_chat_ids": [1936233108]},
+        }
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1936233108",
+            "message": "Hello",
+        })
+        assert resp.status_code == 200
+
+    def test_blocked_chat_id_returns_403(self, app, client):
+        app.config["athena_config"] = {
+            "telegram": {"allowed_chat_ids": [1936233108]},
+        }
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-9999999999",
+            "message": "Hello",
+        })
+        assert resp.status_code == 403
+
+    def test_no_allowlist_allows_all(self, app, client):
+        """If allowed_chat_ids is empty or missing, all chat IDs pass."""
+        app.config["athena_config"] = {"telegram": {}}
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-9999999999",
+            "message": "Hello",
+        })
+        assert resp.status_code == 200
+
+
+class TestSimpleChatMaxMessages:
+    """Max message cap on Telegram sessions."""
+
+    def test_max_messages_returns_429(self, app, client):
+        app.config["athena_config"] = {
+            "telegram": {"max_session_messages": 2},
+        }
+        # Send 2 messages to fill the cap
+        for _ in range(2):
+            client.post("/api/chat/simple", json={
+                "session_id": "tg-1001001001",
+                "message": "fill",
+            })
+        # Third should be rejected
+        resp = client.post("/api/chat/simple", json={
+            "session_id": "tg-1001001001",
+            "message": "too many",
+        })
+        assert resp.status_code == 429
+
+
+class TestStreamingEndpoint:
+    """Basic tests for POST /api/chat/stream."""
+
+    def test_stream_missing_message(self, client):
+        resp = client.post("/api/chat/stream", json={"session_id": "abc"})
+        assert resp.status_code == 400
+
+    def test_stream_missing_session_id(self, client):
+        resp = client.post("/api/chat/stream", json={"message": "test"})
         assert resp.status_code == 400

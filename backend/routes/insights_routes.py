@@ -17,10 +17,6 @@ insights_bp = Blueprint("insights", __name__)
 
 @insights_bp.route("/api/insights", methods=["GET"])
 def insights():
-    mentor = current_app.config.get("mentor")
-    if mentor is None:
-        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 503
-
     g = current_app.config["graph"]
     stats = g.get_stats()
     if stats["total_nodes"] == 0:
@@ -36,8 +32,11 @@ def insights():
 
     graph_summary = "\n".join(summary_parts)
 
+    client = current_app.config.get("claude_client")
+    if client is None:
+        return jsonify({"error": "Claude API not configured"}), 503
+
     try:
-        client = anthropic.Anthropic()
         response = client.messages.create(
             model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             max_tokens=1024,
@@ -46,4 +45,5 @@ def insights():
         )
         return jsonify({"insights": response.content[0].text})
     except anthropic.APIError as e:
-        return jsonify({"error": f"Claude API error: {e}"}), 502
+        logger.error(f"Insights API error: {e}")
+        return jsonify({"error": "Failed to generate insights. Try again."}), 502

@@ -10,6 +10,10 @@ backend/chat_sessions/
 .env
 backend/.env
 
+# Deployment secrets and logs
+deployment/secrets/
+logs/
+
 # Python
 __pycache__/
 *.pyc

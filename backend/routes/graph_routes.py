@@ -146,9 +146,9 @@ def suggest_links():
         return jsonify({"suggestions": suggestions})
 
     # Full graph AI analysis
-    mentor = current_app.config.get("mentor")
-    if mentor is None:
-        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 503
+    client = current_app.config.get("claude_client")
+    if client is None:
+        return jsonify({"error": "Claude API not configured"}), 503
 
     g = current_app.config["graph"]
     stats = g.get_stats()
@@ -178,7 +178,6 @@ def suggest_links():
     )
 
     try:
-        client = anthropic.Anthropic()
         response = client.messages.create(
             model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             max_tokens=1024,
@@ -200,4 +199,4 @@ def suggest_links():
         return jsonify({"suggestions": []})
     except (anthropic.APIError, json.JSONDecodeError) as e:
         logger.error(f"suggest-links error: {e}")
-        return jsonify({"error": str(e)}), 502
+        return jsonify({"error": "Failed to generate suggestions. Try again."}), 502

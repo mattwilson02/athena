@@ -1,0 +1,8 @@
+chroma_db/
+chat_sessions/
+.env
+__pycache__/
+*.pyc
+tests/
+.coverage
+.pytest_cache/

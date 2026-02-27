@@ -348,12 +348,12 @@ class MentorAgent:
     history is passed in from the chat store."""
 
     def __init__(self, graph: VaultGraph, vector_index: VectorIndex, schema: dict,
-                 vault_path: str | None = None) -> None:
+                 vault_path: str | None = None, client: anthropic.Anthropic | None = None) -> None:
         self.graph = graph
         self.vector_index = vector_index
         self.schema = schema
         self.system_prompt_template = build_system_prompt(schema, vault_path)
-        self.client = anthropic.Anthropic()
+        self.client = client or anthropic.Anthropic()
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
         logger.info(f"System prompt built from schema ({len(self.system_prompt_template)} chars)")
 
