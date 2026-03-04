@@ -82,6 +82,11 @@ def require_auth():
     if not is_protected:
         return None  # Allow through
 
+    # Dev mode: no tokens configured → skip auth entirely
+    auth_tokens = current_app.config.get("auth_tokens", {})
+    if not auth_tokens:
+        return None
+
     username = authenticate()
     if username is None:
         return jsonify({"error": "Unauthorized"}), 401

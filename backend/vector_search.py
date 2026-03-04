@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 import chromadb
 
@@ -18,6 +19,46 @@ class VectorIndex:
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
 
+    @staticmethod
+    def _build_doc(node: dict) -> tuple[str, dict]:
+        """Build a (document, metadata) pair for a single node."""
+        node_id = node["id"]
+        title = node.get("title", node_id)
+        tags = node.get("tags", [])
+        if isinstance(tags, list):
+            tags_str = ", ".join(str(t) for t in tags)
+        else:
+            tags_str = str(tags)
+        content = node.get("content", "")
+
+        # Include date fields so temporal queries match semantically
+        date_parts = []
+        for date_field in ("date", "due", "deadline", "created"):
+            val = node.get(date_field)
+            if val:
+                date_str = str(val)
+                date_parts.append(f"{date_field}: {date_str}")
+                try:
+                    dt = datetime.fromisoformat(date_str.split("T")[0])
+                    date_parts.append(dt.strftime("%A %d %B %Y"))
+                except (ValueError, TypeError):
+                    pass
+        date_text = "\n".join(date_parts)
+
+        doc = f"{title}\n{tags_str}\n{date_text}\n{content}" if date_text else f"{title}\n{tags_str}\n{content}"
+
+        metadata = {
+            "type": node.get("type", "unknown"),
+            "title": title,
+            "tags": tags_str,
+        }
+        for date_field in ("date", "due", "deadline", "created"):
+            val = node.get(date_field)
+            if val:
+                metadata[date_field] = str(val)
+
+        return doc, metadata
+
     def index_all(self, nodes: list[dict]) -> None:
         """Embed all nodes into the collection."""
         if not nodes:
@@ -28,28 +69,26 @@ class VectorIndex:
         metadatas = []
 
         for node in nodes:
-            node_id = node["id"]
-            title = node.get("title", node_id)
-            tags = node.get("tags", [])
-            if isinstance(tags, list):
-                tags_str = ", ".join(str(t) for t in tags)
-            else:
-                tags_str = str(tags)
-            content = node.get("content", "")
-
-            doc = f"{title}\n{tags_str}\n{content}"
-
-            ids.append(node_id)
+            doc, metadata = self._build_doc(node)
+            ids.append(node["id"])
             documents.append(doc)
-            metadatas.append({
-                "type": node.get("type", "unknown"),
-                "title": title,
-                "tags": tags_str,
-            })
+            metadatas.append(metadata)
 
         # ChromaDB upsert handles batching internally
         self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         logger.info(f"Indexed {len(ids)} nodes into ChromaDB")
+
+    def upsert_one(self, node: dict) -> None:
+        """Upsert a single node into the index without rebuilding."""
+        doc, metadata = self._build_doc(node)
+        self.collection.upsert(ids=[node["id"]], documents=[doc], metadatas=[metadata])
+
+    def delete_one(self, node_id: str) -> None:
+        """Remove a single node from the index."""
+        try:
+            self.collection.delete(ids=[node_id])
+        except Exception:
+            pass
 
     def search(self, query: str, n: int = 5) -> list[dict]:
         """Semantic search, returning ranked results."""

@@ -1,8 +1,10 @@
-"""Vault write / update / rebuild / repair endpoints."""
+"""Vault write / update / rebuild / repair / audit endpoints."""
 
 from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify, request
+
+from services.audit_service import audit_vault
 
 vault_bp = Blueprint("vault", __name__)
 
@@ -44,4 +46,14 @@ def vault_rebuild():
 @vault_bp.route("/api/vault/repair", methods=["POST"])
 def vault_repair():
     result = current_app.config["vault_service"].repair()
+    return jsonify(result)
+
+
+@vault_bp.route("/api/vault/audit", methods=["POST"])
+def vault_audit():
+    result = audit_vault(
+        current_app.config["graph"],
+        current_app.config["schema"],
+        current_app.config["vault_path"],
+    )
     return jsonify(result)

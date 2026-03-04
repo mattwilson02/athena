@@ -1,43 +1,51 @@
-# Next Session — Things to Fix
+# Athena — Current Work: Pre-Epoch Prep
 
-## Graph Updates (UI + Backend)
-- Updates don't show what actually changed — need more descriptive text (e.g. "Added tag: cycling" or "Updated status: active → completed")
-- Can't update node name/title through graph updates — currently only supports content/tags/edges
-- Failed updates still show as "updated" after page refresh — need proper error handling + rollback in UI state
-- Updates don't reflect in UI until page refresh — should update in-place immediately after accept
+> Prep phase before E2 begins. See [ROADMAP.md](ROADMAP.md) for full epoch sequence.
+> See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for the assessment this is built on.
 
-## Telegram Integration
-- ~2/9 messages failing on the Send Message node (Bad Gateway / connection closed)
-- Likely Cloudflare quick tunnel instability — investigate persistent tunnel or retry logic in n8n
-- Consider adding retry on fail in n8n Send Message node settings
+---
 
-## n8n Hosting / Stability
-- Workflow lost when volume wiped (`docker compose down -v`) — unacceptable
-- Options to fix:
-  1. **Export workflow JSON** — save to `deployment/n8n/workflow.json`, import on fresh start
-  2. **n8n Cloud** — hosted, no tunnel needed, but adds a dependency
-  3. **Cloudflare named tunnel** — persistent URL, no quick tunnel instability
-- At minimum: export the current workflow and commit it so it's recoverable
+## Prep Phase Checklist
 
-## Telegram Security Review
-- ~~Chat ID allowlist~~ Done — 403 for unknown IDs
-- Rate limiting — no per-session rate limit beyond max_session_messages cap
-- Webhook secret token — Telegram supports `secret_token` on webhooks, n8n may not expose this
+### 1. Schema V3 — Full Redesign
+- [ ] Audit current 27 types — which earn their existence?
+- [ ] Resolve goal vs project boundary
+- [ ] Decide on `note` — keep constrained or eliminate?
+- [ ] Decide on financial types — 3 or 1?
+- [ ] Decide on life types — memory vs experience vs daily
+- [ ] Add `permanence` field to common frontmatter
+- [ ] Define permanence defaults per type
+- [ ] Whitelist status values per type
+- [ ] Design human fundamentals (type or scaffold)
+- [ ] Design commitment tracking (type or tagged task)
+- [ ] Write new `vault/_meta/schema.md` (V3)
+- [ ] Update `schema_parser.py` if parse logic changes
+- [ ] Run tests — ensure parser still works
 
-## Activity Feed
-- Nodes created/updated via Telegram confirm flow may not show in desktop activity until page refresh
-- Frontend should auto-refresh activity after graph changes or poll periodically
+### 2. Vault Archive & Reset
+- [ ] Move all vault nodes to `_backup/v2/`
+- [ ] Clear `backend/chroma_db/`
+- [ ] Clear `backend/chat_sessions/`
+- [ ] Rebuild Docker containers
+- [ ] Verify: audit returns 0 nodes, graph stats 0/0
 
-## Telegram/Desktop Session Separation — CONFIRMED BUG
-- Session list filtering (source=desktop) is implemented but not verified end-to-end
-- Telegram messages may still appear in desktop chat view — needs investigation
-- Check: is the frontend actually calling /api/chat/sessions without source param? (it should default to desktop)
-- Check: are tg-* sessions showing in the sidebar, or are messages leaking into desktop sessions?
-- Docker container needs rebuild to pick up the session filtering change
+### 3. SOUL.md Rewrite
+- [ ] Add `## Conflict Protocol` — 5-step escalation ladder
+- [ ] Add `## Mode Selection` — four modes + activation criteria
+- [ ] Add `## Bootstrap Protocol` — fundamentals onboarding
+- [ ] Strengthen `## Boundaries` — anti-patterns, no cheerleading
+- [ ] Update `_load_soul()` in `mentor_agent.py` to parse new sections
+- [ ] Run tests
 
-## Graph Organisation
-- Node organisation not fully dialled — review how types/domains are categorised
-- Review cross-referencing quality
+### 4. Documentation
+- [x] Write `docs/GAP_ANALYSIS.md`
+- [x] Write `docs/ROADMAP.md`
+- [x] Update `docs/STATUS.md`
+- [x] Update `docs/TODO_NEXT.md` (this file)
+- [ ] Clean up stale docs (`docs/OPEN_PROBLEMS.md` — concurrent write is solved)
 
-## Pending
-- ~~Commit all Phase 3 changes~~ Done
+---
+
+## After Prep: E2 Shaping
+
+Once prep is complete, shape E2 ("Conversations That Stick") as a full epoch doc in `docs/epochs/E2_conversations_that_stick.md`. Follow PROCESS.md: press release, in/out scope, spec, acceptance criteria, risk.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 import yaml
 from flask import Flask, jsonify
@@ -114,11 +115,24 @@ def create_app() -> Flask:
         store_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_sessions")
     )
 
+    vault_lock = threading.RLock()
+
     def rebuild_all() -> dict:
-        nodes, edges = parser.parse()
-        graph.build_from_parsed(nodes, edges)
-        vector_index.rebuild(nodes)
-        return graph.get_stats()
+        with vault_lock:
+            nodes, edges = parser.parse()
+            graph.build_from_parsed(nodes, edges)
+            vector_index.rebuild(nodes)
+            return graph.get_stats()
+
+    def refresh_after_write(changed_node_id: str) -> dict:
+        """Re-parse vault and rebuild graph, but only upsert the changed node into vectors."""
+        with vault_lock:
+            nodes, edges = parser.parse()
+            graph.build_from_parsed(nodes, edges)
+            changed = next((n for n in nodes if n["id"] == changed_node_id), None)
+            if changed:
+                vector_index.upsert_one(changed)
+            return graph.get_stats()
 
     # Boot
     logger.info(f"Booting Athena — vault at {vault_path}")
@@ -141,7 +155,7 @@ def create_app() -> Flask:
         logger.warning("No API key — chat and insights endpoints disabled")
 
     # Services
-    vault_service = VaultService(vault_path, graph, vector_index, schema, rebuild_all)
+    vault_service = VaultService(vault_path, graph, vector_index, schema, rebuild_all, lock=vault_lock, refresh_fn=refresh_after_write)
     chat_service = ChatService(chat_store, mentor, graph, vector_index, vault_service=vault_service)
 
     # Store on app.config for blueprint access

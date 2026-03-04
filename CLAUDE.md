@@ -38,7 +38,8 @@ athena/
 │   │   ├── vault_routes.py       # /api/vault/*
 │   │   └── insights_routes.py    # /api/insights
 │   ├── services/
-│   │   ├── vault_service.py      # File I/O, cross-referencing, repair
+│   │   ├── vault_service.py      # File I/O, cross-referencing, repair (thread-safe)
+│   │   ├── audit_service.py      # Vault health auditing (stale, orphans, broken links)
 │   │   └── chat_service.py       # Message orchestration (streaming + sync)
 │   ├── schema_parser.py          # Parses schema.md at boot
 │   ├── vault_parser.py           # Markdown → nodes + edges
@@ -177,6 +178,7 @@ Telegram sessions use a **chat ID allowlist** — only IDs listed in `config.yam
 - `POST /api/vault/update` — patch existing node (frontmatter, content, tags, edges)
 - `POST /api/vault/rebuild` — rebuild graph + vector indexes
 - `POST /api/vault/repair` — walk vault and fix corrupted files
+- `POST /api/vault/audit` — scan vault for stale statuses, orphans, broken wikilinks, type mismatches
 
 ## Code Style
 

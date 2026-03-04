@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import anthropic
 
@@ -43,6 +44,16 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
 # Types where recency matters most.
 _RECENCY_SENSITIVE_TYPES = {"task", "daily", "reminder", "event", "expense", "memory"}
 
+# Status penalties — deprioritize resolved/inactive nodes in retrieval.
+_STATUS_PENALTIES: dict[str, float] = {
+    "completed": -0.15,
+    "done": -0.15,
+    "cancelled": -0.25,
+    "archived": -0.25,
+    "abandoned": -0.25,
+    "parked": -0.10,
+}
+
 # Rough token budget for the context window.
 _MAX_CONTEXT_TOKENS = 3000
 _CHARS_PER_TOKEN = 4  # conservative estimate
@@ -57,11 +68,12 @@ def _load_soul(vault_path: str | None = None) -> tuple[str, str]:
     Parses the markdown sections into an identity block and an instructions block.
     Falls back to minimal defaults if the file is missing.
     """
-    # Look for SOUL.md in the project root (one level up from backend/)
+    # Look for SOUL.md in the project root (one level up from backend/) or same dir
     search_paths = []
     if vault_path:
         search_paths.append(os.path.join(vault_path, "..", "SOUL.md"))
     search_paths.append(os.path.join(os.path.dirname(__file__), "..", "SOUL.md"))
+    search_paths.append(os.path.join(os.path.dirname(__file__), "SOUL.md"))  # Docker mount
 
     soul_path = None
     for p in search_paths:
@@ -103,7 +115,13 @@ def _load_soul(vault_path: str | None = None) -> tuple[str, str]:
         identity_parts.append(sections["identity"])
     if "voice" in sections:
         identity_parts.append(sections["voice"])
-    identity_parts.append("TODAY: {today}")
+    identity_parts.append(
+        "DATE RULES:\n"
+        "- TODAY: {today}. This is authoritative. Do NOT infer today's date from logs or other data.\n"
+        "- When the context contains pre-computed date facts (e.g. 'in exactly 70 days'), use those "
+        "numbers EXACTLY. Never do your own date arithmetic — the computed values are correct.\n"
+        "- If asked 'how many days until X' and the context says 'in exactly N days', answer N."
+    )
     identity_parts.append("CONTEXT FROM KNOWLEDGE GRAPH:\n{context}")
     identity = "\n\n".join(identity_parts)
 
@@ -146,6 +164,7 @@ def load_insights_prompt(vault_path: str | None = None) -> str:
     if vault_path:
         search_paths.append(os.path.join(vault_path, "..", "SOUL.md"))
     search_paths.append(os.path.join(os.path.dirname(__file__), "..", "SOUL.md"))
+    search_paths.append(os.path.join(os.path.dirname(__file__), "SOUL.md"))  # Docker mount
 
     for p in search_paths:
         candidate = os.path.abspath(p)
@@ -172,7 +191,10 @@ DEDUPLICATION:
 - Before proposing a "create", check the CONTEXT above for existing nodes that match.
 - If a person, place, or concept already exists in the graph, use "update" or "link" instead of \
 creating a duplicate.
-- When updating an existing node, use the "update" action with its existing node_id."""
+- When updating an existing node, use the "update" action with its existing node_id.
+- Dedup means "don't create duplicates of the same thing" — it does NOT mean "fold everything \
+into existing nodes". A new task related to a project is NOT a duplicate of the project — create \
+the task and link it."""
 
 _FORMAT_SPEC = """\
 GRAPH UPDATE FORMAT:
@@ -190,6 +212,26 @@ TYPE PRIORITY: "note" and "idea" are LAST RESORT. NEVER use them if a specific t
 - A book/article takeaway → "idea" or update the "book"/"article"
 - A future plan or to-do → "task" or "project" (NOT "note")
 If you catch yourself typing "note", stop and reconsider.
+
+WRITE AGGRESSIVENESS — CONVERSATIONS ARE WRITE OPERATIONS:
+- Any change to plans, schedules, status, or decisions MUST produce graph updates.
+- Cancel or reschedule → update node status/frontmatter (set cancelled/superseded/completed).
+- New plan or commitment → create a node.
+- Changed priority or timing → update frontmatter fields.
+- If you respond to a user's change without proposing a graph update, that knowledge is LOST.
+
+TARGETING — CREATE SPECIFIC NODES, DON'T UPDATE HUBS:
+- New task related to a project → CREATE a task node + LINK to the project. Do NOT append to the \
+project's content.
+- Only UPDATE a node when you are explicitly adding information to THAT specific node.
+- Prefer specific nodes (task, event, person) over generic ones (project, goal).
+- When a plan is replaced, update the old node's status to "cancelled" or "superseded" — don't \
+leave multiple active versions.
+
+CASCADE — CHECK CONNECTED NODES:
+- When you update a node, check its graph neighbors in the CONTEXT above.
+- If connected nodes reference the changed information (old timing, old status, old plan), \
+propose updates to those too.
 
 <graph_updates>
 [
@@ -211,7 +253,7 @@ If you catch yourself typing "note", stop and reconsider.
     "changes": {{
       "title": "New Title (only if renaming the node)",
       "content": "Full replacement text (replaces body, use only when rewriting)",
-      "frontmatter": {{"company": "Google"}},
+      "frontmatter": {{"status": "active", "company": "Google"}},
       "append_content": "New information to add (appends, does not replace).",
       "add_tags": ["new-tag"],
       "add_edges": [{{"target": "other-node", "type": "relates_to"}}]
@@ -295,12 +337,65 @@ def _recency_score(node: dict) -> float:
     return 1.0 - (days_ago / 90.0)
 
 
+def _format_date_context(node: dict, today: date | None = None) -> str:
+    """Compute human-readable date-relative facts for a node's date fields.
+
+    Returns lines like 'Date: 2026-05-09 (in 70 days)' so the LLM reads
+    pre-computed facts instead of doing date arithmetic.
+    """
+    if today is None:
+        today = date.today()
+    date_fields = ("date", "due", "deadline", "created", "updated")
+    lines = []
+
+    for field in date_fields:
+        val = node.get(field)
+        if val is None:
+            continue
+
+        parsed = None
+        if hasattr(val, "isoformat") and hasattr(val, "year"):
+            parsed = val
+        elif isinstance(val, str):
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    parsed = datetime.strptime(val, fmt).date()
+                    break
+                except ValueError:
+                    continue
+
+        if parsed is None:
+            continue
+
+        delta = (parsed - today).days
+        if delta == 0:
+            relative = "today"
+        elif delta == 1:
+            relative = "tomorrow"
+        elif delta == -1:
+            relative = "yesterday"
+        elif delta > 1:
+            relative = f"in {delta} days"
+        else:
+            relative = f"{abs(delta)} days ago"
+
+        lines.append(f"{field.capitalize()}: {parsed.isoformat()} ({relative})")
+
+    return "\n".join(lines)
+
+
 def _node_context_full(node: dict, neighbor_names: list[str]) -> str:
     """Full context string for a direct-match node."""
     parts = [
         f"--- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) ---",
         f"ID: {node['id']}",
     ]
+    date_ctx = _format_date_context(node)
+    if date_ctx:
+        parts.append(date_ctx)
+    status = node.get("status")
+    if status:
+        parts.append(f"Status: {status}")
     tags = node.get("tags", [])
     if tags:
         tag_str = ", ".join(str(t) for t in tags) if isinstance(tags, list) else str(tags)
@@ -319,6 +414,12 @@ def _node_context_summary(node: dict, neighbor_names: list[str]) -> str:
         f"--- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) ---",
         f"ID: {node['id']}",
     ]
+    date_ctx = _format_date_context(node)
+    if date_ctx:
+        parts.append(date_ctx)
+    status = node.get("status")
+    if status:
+        parts.append(f"Status: {status}")
     tags = node.get("tags", [])
     if tags:
         tag_str = ", ".join(str(t) for t in tags) if isinstance(tags, list) else str(tags)
@@ -343,6 +444,84 @@ def _extract_session_topics(history: list[dict], max_messages: int = 5) -> list[
     return user_messages[-max_messages:]
 
 
+_DAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+
+
+def _resolve_temporal_query(query: str) -> tuple[date, date] | None:
+    """Detect temporal phrases and resolve to (start_date, end_date).
+
+    Returns None if no temporal phrase is detected.
+    """
+    q = query.lower()
+    today = date.today()
+    weekday = today.weekday()  # 0=Monday
+
+    if "today" in q or "tonight" in q:
+        return today, today
+    if "tomorrow" in q:
+        tmr = today + timedelta(days=1)
+        return tmr, tmr
+    if "yesterday" in q:
+        return today - timedelta(days=1), today - timedelta(days=1)
+    if "this weekend" in q:
+        days_to_sat = (5 - weekday) % 7
+        sat = today + timedelta(days=days_to_sat)
+        return sat, sat + timedelta(days=1)
+    if "next weekend" in q:
+        days_to_sat = (5 - weekday) % 7
+        if days_to_sat == 0:
+            days_to_sat = 7
+        sat = today + timedelta(days=days_to_sat + 7)
+        return sat, sat + timedelta(days=1)
+    if "this week" in q:
+        mon = today - timedelta(days=weekday)
+        return mon, mon + timedelta(days=6)
+    if "next week" in q:
+        mon = today - timedelta(days=weekday) + timedelta(weeks=1)
+        return mon, mon + timedelta(days=6)
+    if "this month" in q:
+        start = today.replace(day=1)
+        if today.month == 12:
+            end = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+        return start, end
+
+    for day_name, day_num in _DAY_NAMES.items():
+        if day_name in q:
+            days_ahead = (day_num - weekday) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            target = today + timedelta(days=days_ahead)
+            return target, target
+
+    return None
+
+
+def _get_nodes_in_date_range(graph, start: date, end: date) -> list[dict]:
+    """Scan all nodes for matching date/due/deadline fields within range."""
+    matches = []
+    for node in graph.get_all_nodes():
+        for field in ("date", "due", "deadline"):
+            val = node.get(field)
+            if not val:
+                continue
+            try:
+                if isinstance(val, (date, datetime)):
+                    node_date = val if isinstance(val, date) else val.date()
+                else:
+                    node_date = datetime.fromisoformat(str(val).split("T")[0]).date()
+            except (ValueError, TypeError):
+                continue
+            if start <= node_date <= end:
+                matches.append(node)
+                break
+    return matches
+
+
 class MentorAgent:
     """Claude-powered AI assistant with hybrid retrieval. Stateless — conversation
     history is passed in from the chat store."""
@@ -365,12 +544,20 @@ class MentorAgent:
 
         Returns (context_string, search_results).
         """
+        # Step 0: Temporal query resolution — detect date phrases and find matching nodes
+        temporal_node_ids: set[str] = set()
+        date_range = _resolve_temporal_query(query)
+        if date_range:
+            temporal_nodes = _get_nodes_in_date_range(self.graph, date_range[0], date_range[1])
+            temporal_node_ids = {n["id"] for n in temporal_nodes}
+            logger.debug(f"Temporal resolution: {date_range[0]} to {date_range[1]}, {len(temporal_node_ids)} nodes")
+
         # Step 1: Classify query domains
         relevant_domains = _classify_domains(query)
 
         # Step 2: Semantic search — fetch more candidates, we'll rank them
         search_results = self.vector_index.search(query, n=10)
-        if not search_results:
+        if not search_results and not temporal_node_ids:
             return "(No relevant nodes found in knowledge graph)", []
 
         # Session-aware boosting: search on recent user messages for additional context
@@ -408,15 +595,38 @@ class MentorAgent:
                 if node:
                     recency_boost = _recency_score(node) * 0.15
 
-            # Centrality boost — well-connected nodes are more important
+            # Centrality boost — logarithmic so hubs don't dominate
             degree = self.graph.get_degree(result["id"])
-            centrality_boost = min(degree * 0.03, 0.15)
+            centrality_boost = min(math.log1p(degree) * 0.02, 0.08)
+
+            # Temporal boost — nodes matching the date range in the query
+            temporal_boost = 0.3 if result["id"] in temporal_node_ids else 0.0
 
             # Session boost — nodes relevant to conversation history
             s_boost = session_boost.get(result["id"], 0.0)
 
-            total = semantic_score + domain_boost + recency_boost + centrality_boost + s_boost
+            # Status penalty — deprioritize resolved/inactive nodes
+            node_status = str(result.get("status", "") or "").lower()
+            if not node_status:
+                node_data = self.graph.get_node(result["id"])
+                node_status = str(node_data.get("status", "") if node_data else "").lower()
+            status_penalty = _STATUS_PENALTIES.get(node_status, 0.0)
+
+            total = semantic_score + domain_boost + recency_boost + centrality_boost + temporal_boost + s_boost + status_penalty
             scored.append((total, result))
+
+        # Inject temporal nodes not already in semantic results
+        result_ids = {r.get("id") for _, r in scored}
+        for nid in temporal_node_ids:
+            if nid not in result_ids:
+                node = self.graph.get_node(nid)
+                if node:
+                    scored.append((0.3, {
+                        "id": nid,
+                        "title": node.get("title", nid),
+                        "type": node.get("type", "unknown"),
+                        "score": 0.5,
+                    }))
 
         # Inject highly-boosted session nodes not already in results
         result_ids = {r.get("id") for _, r in scored}
@@ -453,6 +663,59 @@ class MentorAgent:
         context_parts: list[str] = []
         char_budget = _MAX_CONTEXT_TOKENS * _CHARS_PER_TOKEN
         chars_used = 0
+
+        # Temporal facts header — pre-computed date facts at the TOP so Claude reads them first
+        today = date.today()
+        temporal_header_parts = [f"TODAY: {today.strftime('%A, %d %B %Y')}"]
+        if date_range:
+            start, end = date_range
+            if start == end:
+                temporal_header_parts.append(f"Query date: {start.strftime('%A %d %B %Y')}")
+            else:
+                temporal_header_parts.append(
+                    f"Query range: {start.strftime('%A %d %b')} – {end.strftime('%A %d %b %Y')}"
+                )
+        # Collect all date-bearing nodes from top results + temporal matches for the header
+        all_top_ids = {r["id"] for _, r in scored[:5]} | temporal_node_ids
+        for nid in all_top_ids:
+            node = self.graph.get_node(nid)
+            if not node:
+                continue
+            for field in ("date", "due", "deadline"):
+                val = node.get(field)
+                if not val:
+                    continue
+                parsed = None
+                if hasattr(val, "isoformat") and hasattr(val, "year"):
+                    parsed = val
+                elif isinstance(val, str):
+                    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+                        try:
+                            parsed = datetime.strptime(val, fmt).date()
+                            break
+                        except ValueError:
+                            continue
+                if parsed:
+                    delta = (parsed - today).days
+                    if delta == 0:
+                        dist = "today"
+                    elif delta == 1:
+                        dist = "tomorrow"
+                    elif delta == -1:
+                        dist = "yesterday"
+                    elif delta > 1:
+                        dist = f"in exactly {delta} days"
+                    else:
+                        dist = f"exactly {abs(delta)} days ago"
+                    temporal_header_parts.append(
+                        f"FACT: {node.get('title', nid)} — {parsed.strftime('%A %d %B %Y')} ({dist})"
+                    )
+                    break  # one date per node in header
+
+        if len(temporal_header_parts) > 1:
+            header = "\n".join(temporal_header_parts)
+            context_parts.append(header)
+            chars_used += len(header)
 
         # Tier 1: Direct matches — full content
         for result in top_results:
@@ -647,21 +910,59 @@ class MentorAgent:
     def _validate_types(self, updates: list[dict]) -> list[dict]:
         """Post-process graph updates to catch invalid or misclassified types."""
         valid_types = set(self.schema.get("type_list", []))
+        valid_edge_types = {
+            "relates_to", "blocked_by", "supported_by", "contradicts",
+            "inspired_by", "involves", "part_of", "located_in",
+            "funded_by", "met_at",
+        }
+
         for update in updates:
-            if update.get("action") != "create":
-                continue
-            proposed = update.get("type", "")
-            if proposed in valid_types:
-                continue
-            # Try lowercase
-            lower = proposed.lower().strip()
-            if lower in valid_types:
-                update["type"] = lower
-                continue
-            # Unknown type — fall back to note
-            logger.warning(
-                f"AI proposed invalid type '{proposed}' for '{update.get('node_id')}' "
-                f"— falling back to 'note'"
-            )
-            update["type"] = "note"
+            action = update.get("action", "")
+
+            # Validate type on create actions
+            if action == "create":
+                proposed = update.get("type", "")
+                if proposed and proposed not in valid_types:
+                    lower = proposed.lower().strip()
+                    if lower in valid_types:
+                        update["type"] = lower
+                    else:
+                        logger.warning(
+                            f"AI proposed invalid type '{proposed}' for '{update.get('node_id')}' "
+                            f"— falling back to 'note'"
+                        )
+                        update["type"] = "note"
+
+                # Validate edge types on create edges
+                for edge in update.get("edges", []):
+                    if edge.get("type") not in valid_edge_types:
+                        logger.warning(f"Invalid edge type '{edge.get('type')}' — using 'relates_to'")
+                        edge["type"] = "relates_to"
+
+            # Validate type changes on update actions
+            elif action == "update":
+                changes = update.get("changes", {})
+                fm = changes.get("frontmatter", {})
+                if isinstance(fm, dict) and "type" in fm:
+                    proposed = fm["type"]
+                    if proposed not in valid_types:
+                        lower = proposed.lower().strip()
+                        if lower in valid_types:
+                            fm["type"] = lower
+                        else:
+                            logger.warning(f"Invalid type '{proposed}' in update — removing")
+                            del fm["type"]
+
+                # Validate edge types on add_edges
+                for edge in changes.get("add_edges", []):
+                    if edge.get("type") not in valid_edge_types:
+                        logger.warning(f"Invalid edge type '{edge.get('type')}' — using 'relates_to'")
+                        edge["type"] = "relates_to"
+
+            # Validate edge type on link actions
+            elif action == "link":
+                if update.get("type") not in valid_edge_types:
+                    logger.warning(f"Invalid link type '{update.get('type')}' — using 'relates_to'")
+                    update["type"] = "relates_to"
+
         return updates

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 
 import yaml
@@ -17,12 +18,14 @@ logger = logging.getLogger(__name__)
 class VaultService:
     """Encapsulates all vault file manipulation."""
 
-    def __init__(self, vault_path: str, graph, vector_index, schema: dict, rebuild_fn):
+    def __init__(self, vault_path: str, graph, vector_index, schema: dict, rebuild_fn, lock: threading.RLock | None = None, refresh_fn=None):
         self.vault_path = vault_path
         self.graph = graph
         self.vector_index = vector_index
         self.schema = schema
         self.rebuild_fn = rebuild_fn
+        self.refresh_fn = refresh_fn
+        self.lock = lock or threading.RLock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -30,6 +33,10 @@ class VaultService:
 
     def write(self, data: dict) -> dict:
         """Write a new node to the vault. Returns {ok, filepath, stats, suggested_links} or {error}."""
+        with self.lock:
+            return self._write_locked(data)
+
+    def _write_locked(self, data: dict) -> dict:
         node_id = data.get("node_id")
         title = data.get("title", node_id)
         node_type = data.get("type")
@@ -96,7 +103,10 @@ class VaultService:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(md)
 
-        stats = self.rebuild_fn()
+        if self.refresh_fn:
+            stats = self.refresh_fn(node_id)
+        else:
+            stats = self.rebuild_fn()
         suggested_links = self.find_cross_references(node_id)
 
         return {
@@ -108,6 +118,10 @@ class VaultService:
 
     def update(self, data: dict) -> dict:
         """Update an existing node. Returns {ok, node_id, stats} or {error}."""
+        with self.lock:
+            return self._update_locked(data)
+
+    def _update_locked(self, data: dict) -> dict:
         node_id = data.get("node_id")
         if not node_id:
             return {"error": "node_id is required", "status": 400}
@@ -198,11 +212,18 @@ class VaultService:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"---\n{fm_str}---\n\n{body}")
 
-        stats = self.rebuild_fn()
+        if self.refresh_fn:
+            stats = self.refresh_fn(node_id)
+        else:
+            stats = self.rebuild_fn()
         return {"ok": True, "node_id": node_id, "stats": stats}
 
     def repair(self) -> dict:
         """Fix duplicate sections and heading issues across all vault files."""
+        with self.lock:
+            return self._repair_locked()
+
+    def _repair_locked(self) -> dict:
         skip_dirs = {"_meta", "_templates", "_backup", ".git"}
         count = 0
 
