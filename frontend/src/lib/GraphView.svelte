@@ -632,6 +632,17 @@
       allEdges = data.edges;
       if (!allNodes.length) { isEmpty = true; return; }
       applyFilter();
+      // Handle pending node selection after graph loads
+      if (selectedNode && simNodes.length > 0) {
+        handleNodeClick(selectedNode);
+        const node = nodeMap[selectedNode];
+        if (node && canvasEl) {
+          const cx = canvasEl.width / (2 * dpr);
+          const cy = canvasEl.height / (2 * dpr);
+          panOffset.x = cx - node.x * zoom;
+          panOffset.y = cy - node.y * zoom;
+        }
+      }
     } catch { isEmpty = true; }
   }
 

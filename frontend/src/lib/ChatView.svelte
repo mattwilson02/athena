@@ -4,7 +4,7 @@
   import { formatText } from './format.js';
   import GraphUpdateCard from './GraphUpdateCard.svelte';
 
-  let { sessionId = null, onSessionUpdate = () => {}, onNodeSelect = () => {} } = $props();
+  let { sessionId = null, onSessionUpdate = () => {}, onNodeSelect = () => {}, nodeMap = {} } = $props();
 
   let messages = $state([]);
   let inputText = $state('');
@@ -13,6 +13,7 @@
   let messagesContainer = $state(null);
   let loadedSessionId = $state(null);
   let abortController = $state(null);
+  let prevMessageCount = $state(0);
 
   const starterPrompts = [
     "What do you see in my graph?",
@@ -56,10 +57,13 @@
     });
   });
 
-  // Scroll when messages change
+  // Scroll when new messages are added or during streaming (but not on done/finalize)
   $effect(() => {
-    messages;
-    setTimeout(scrollToBottom, 50);
+    const count = messages.length;
+    if (count !== prevMessageCount || isStreaming) {
+      prevMessageCount = count;
+      setTimeout(scrollToBottom, 50);
+    }
   });
 
   function stripGraphUpdates(text) {
@@ -168,7 +172,7 @@
         {#if msg.graphUpdates?.length > 0}
           <div class="graph-updates">
             {#each msg.graphUpdates as update}
-              <GraphUpdateCard {update} {sessionId} />
+              <GraphUpdateCard {update} {sessionId} {nodeMap} {onNodeSelect} />
             {/each}
           </div>
         {/if}

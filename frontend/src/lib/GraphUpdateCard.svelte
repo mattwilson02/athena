@@ -1,12 +1,15 @@
 <script>
-  import { writeNode, updateNode, dismissUpdate } from './api.js';
+  import { writeNode, updateNode, dismissUpdate, getNode } from './api.js';
   import { getTypeColor } from './colors.js';
 
-  let { update, sessionId = null, onAccepted = () => {}, onDismissed = () => {} } = $props();
-  let status = $state(update._dismissed ? 'dismissed' : update._alreadyInVault ? 'accepted' : 'pending');
+  let { update, sessionId = null, nodeMap = {}, onNodeSelect = () => {}, onAccepted = () => {}, onDismissed = () => {} } = $props();
+  const initialStatus = update._dismissed ? 'dismissed' : update._alreadyInVault ? 'accepted' : 'pending';
+  let status = $state(initialStatus);
   let errorMsg = $state('');
   let suggestedLinks = $state([]);
-  let collapsed = $state(status === 'accepted');
+  let collapsed = $state(initialStatus === 'accepted');
+  let contentExpanded = $state(false);
+  let currentNode = $state(null);
 
   const ACTION_LABELS = {
     create: 'New',
@@ -14,15 +17,29 @@
     link: 'Link',
   };
 
+  const HIDDEN_FM_KEYS = new Set(['id', 'type', 'title', 'created', 'updated', 'tags']);
+  const CONTENT_PREVIEW_LENGTH = 200;
+
+  // Fetch current node state for update cards (enables before → after)
+  $effect(() => {
+    if (update.action === 'update' && update.node_id) {
+      getNode(update.node_id).then(n => currentNode = n).catch(() => {});
+    }
+  });
+
+  function resolveTitle(id) {
+    return nodeMap[id]?.title || id;
+  }
+
   function badgeText() {
     if (update.action === 'link') return 'link';
-    if (update.action === 'update') return 'update';
+    if (update.action === 'update') return currentNode?.type || 'update';
     return update.type || 'node';
   }
 
   function badgeColor() {
     if (update.action === 'link') return '#64748b';
-    if (update.action === 'update') return 'var(--warning)';
+    if (update.action === 'update') return getTypeColor(currentNode?.type);
     return getTypeColor(update.type);
   }
 
@@ -35,39 +52,36 @@
 
   function cardTitle() {
     if (update.action === 'link') {
-      return `${update.source} → ${update.target} (${update.type || 'relates_to'})`;
+      return `${resolveTitle(update.source)} → ${resolveTitle(update.target)}`;
     }
     if (update.action === 'update') {
-      return `Update: ${update.node_id}`;
+      return currentNode?.title || resolveTitle(update.node_id);
     }
     return update.title || update.node_id;
   }
 
-  function cardDescription() {
-    if (update.action === 'update' && update.changes) {
-      const parts = [];
-      if (update.changes.frontmatter) {
-        const keys = Object.keys(update.changes.frontmatter);
-        parts.push(`Set ${keys.join(', ')}`);
-      }
-      if (update.changes.append_content) {
-        parts.push(`Add: "${update.changes.append_content.slice(0, 60)}..."`);
-      }
-      if (update.changes.add_tags?.length) {
-        parts.push(`Tags: +${update.changes.add_tags.join(', ')}`);
-      }
-      if (update.changes.add_edges?.length) {
-        parts.push(`${update.changes.add_edges.length} new link(s)`);
-      }
-      return parts.join(' · ') || 'Update node';
-    }
-    if (update.content) {
-      return update.content.slice(0, 120) + (update.content.length > 120 ? '...' : '');
-    }
-    return '';
+  // Get visible frontmatter fields (filter boilerplate)
+  function getVisibleFrontmatter(fm) {
+    if (!fm) return [];
+    return Object.entries(fm).filter(([k]) => !HIDDEN_FM_KEYS.has(k));
+  }
+
+  // Get before value for a frontmatter key from current node
+  function getBeforeValue(key) {
+    if (!currentNode) return null;
+    // Check direct node properties first, then frontmatter
+    if (key in currentNode) return currentNode[key];
+    if (currentNode.frontmatter && key in currentNode.frontmatter) return currentNode.frontmatter[key];
+    return null;
   }
 
   let hasDuplicate = $derived(update._duplicate && update._duplicate.match !== 'none');
+  let hasLongContent = $derived(update.content && update.content.length > CONTENT_PREVIEW_LENGTH);
+  let displayContent = $derived(
+    hasLongContent && !contentExpanded
+      ? update.content.slice(0, CONTENT_PREVIEW_LENGTH) + '...'
+      : update.content || ''
+  );
 
   async function accept() {
     status = 'writing';
@@ -207,21 +221,117 @@
       class:error={status === 'error'}
       style="border-left-color: {borderColor()}"
     >
-      <div class="card-header">
+      <div class="card-header" class:clickable={status === 'accepted'} onclick={() => { if (status === 'accepted') collapsed = true; }}>
         <span class="action-label">{ACTION_LABELS[update.action] || update.action}</span>
         <span class="type-badge" style="background: {badgeColor()}">{badgeText()}</span>
         <span class="card-title">{cardTitle()}</span>
+        {#if update.action !== 'link' && (update.node_id || update.action === 'create')}
+          <button class="btn-view-node" onclick={(e) => { e.stopPropagation(); onNodeSelect(update.node_id); }}>View</button>
+        {/if}
+        {#if status === 'accepted'}<span class="collapse-hint">Collapse</span>{/if}
       </div>
 
-      {#if cardDescription()}
-        <p class="card-content">{cardDescription()}</p>
-      {/if}
+      <!-- CREATE card body -->
+      {#if update.action === 'create'}
+        {#if displayContent}
+          <p class="card-content">{displayContent}</p>
+          {#if hasLongContent}
+            <button class="btn-expand" onclick={() => contentExpanded = !contentExpanded}>
+              {contentExpanded ? 'Show less' : 'Show more'}
+            </button>
+          {/if}
+        {/if}
 
-      {#if update.action === 'create' && update.edges?.length && status === 'pending'}
-        <div class="proposed-edges">
-          {#each update.edges as edge}
-            <span class="edge-pill">{edge.type} → {edge.target}</span>
-          {/each}
+        {#if getVisibleFrontmatter(update.frontmatter).length > 0}
+          <div class="fm-grid">
+            {#each getVisibleFrontmatter(update.frontmatter) as [key, value]}
+              <div class="fm-field">
+                <span class="fm-key">{key}</span>
+                <span class="fm-value">{value}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        {#if update.tags?.length}
+          <div class="tag-row">
+            {#each update.tags as tag}
+              <span class="tag-pill">{tag}</span>
+            {/each}
+          </div>
+        {/if}
+
+        {#if update.edges?.length && status === 'pending'}
+          <div class="edges-section">
+            {#each update.edges as edge}
+              <span class="edge-pill">{edge.type} → {resolveTitle(edge.target)}</span>
+            {/each}
+          </div>
+        {/if}
+
+      <!-- UPDATE card body -->
+      {:else if update.action === 'update' && update.changes}
+        <div class="changes-list">
+          {#if update.changes.title}
+            <div class="change-row">
+              <span class="change-key">title</span>
+              {#if currentNode?.title}
+                <span class="change-before">{currentNode.title}</span>
+                <span class="change-arrow">→</span>
+              {/if}
+              <span class="change-after">{update.changes.title}</span>
+            </div>
+          {/if}
+
+          {#if update.changes.frontmatter}
+            {#each Object.entries(update.changes.frontmatter) as [key, value]}
+              <div class="change-row">
+                <span class="change-key">{key}</span>
+                {#if getBeforeValue(key) != null}
+                  <span class="change-before">{getBeforeValue(key)}</span>
+                  <span class="change-arrow">→</span>
+                {/if}
+                <span class="change-after">{value}</span>
+              </div>
+            {/each}
+          {/if}
+
+          {#if update.changes.content}
+            <div class="change-block">
+              <span class="change-key">content</span>
+              <span class="change-warning">replaces existing</span>
+              <p class="change-content">{update.changes.content}</p>
+            </div>
+          {/if}
+
+          {#if update.changes.append_content}
+            <div class="change-block">
+              <span class="change-key">append</span>
+              <p class="change-content">{update.changes.append_content}</p>
+            </div>
+          {/if}
+
+          {#if update.changes.add_tags?.length}
+            <div class="tag-row">
+              {#each update.changes.add_tags as tag}
+                <span class="tag-pill tag-add">+{tag}</span>
+              {/each}
+            </div>
+          {/if}
+
+          {#if update.changes.add_edges?.length}
+            <div class="edges-section">
+              {#each update.changes.add_edges as edge}
+                <span class="edge-pill">+{edge.type} → {resolveTitle(edge.target)}</span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+      <!-- LINK card body -->
+      {:else if update.action === 'link'}
+        <div class="link-display">
+          <span class="link-type-label">{update.type || 'relates_to'}</span>
         </div>
       {/if}
 
@@ -263,7 +373,7 @@
       {#each suggestedLinks as link}
         {#if link._status !== 'dismissed'}
           <div class="link-suggestion" class:accepted={link._status === 'accepted'}>
-            <span class="link-arrow">{link.source} → {link.target}</span>
+            <span class="link-arrow">{resolveTitle(link.source)} → {resolveTitle(link.target)}</span>
             <span class="link-type">{link.type}</span>
             <span class="link-reason">{link.reason}</span>
             {#if link._status === 'pending'}
@@ -337,7 +447,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-sm);
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }
 
   .action-label {
@@ -372,14 +482,121 @@
     font-weight: 500;
   }
 
+  .card-header.clickable {
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 2px 4px;
+    margin: -2px -4px;
+  }
+
+  .card-header.clickable:hover {
+    background: var(--bg-surface-hover);
+  }
+
+  .collapse-hint {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+  }
+
+  .card-header.clickable:hover .collapse-hint {
+    opacity: 1;
+  }
+
+  .btn-view-node {
+    font-size: var(--text-xs);
+    color: var(--accent);
+    background: none;
+    border: 1px solid var(--accent-soft);
+    border-radius: 4px;
+    padding: 1px 8px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .btn-view-node:hover {
+    background: var(--accent-soft);
+  }
+
+  /* ── Content ── */
+
   .card-content {
     font-size: var(--text-sm);
     color: var(--text-secondary);
     margin-bottom: var(--space-sm);
     line-height: 1.5;
+    white-space: pre-wrap;
   }
 
-  .proposed-edges {
+  .btn-expand {
+    font-size: var(--text-xs);
+    color: var(--accent);
+    background: none;
+    border: none;
+    padding: 0;
+    margin-bottom: var(--space-sm);
+    cursor: pointer;
+  }
+
+  .btn-expand:hover { text-decoration: underline; }
+
+  /* ── Frontmatter grid ── */
+
+  .fm-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: var(--space-sm);
+  }
+
+  .fm-field {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    background: var(--bg-surface-hover);
+    border-radius: 4px;
+    font-size: var(--text-xs);
+  }
+
+  .fm-key {
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
+  .fm-value {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  /* ── Tags ── */
+
+  .tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: var(--space-sm);
+  }
+
+  .tag-pill {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(108, 99, 255, 0.1);
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .tag-add {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+
+  /* ── Edges ── */
+
+  .edges-section {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
@@ -395,6 +612,84 @@
     font-weight: 500;
   }
 
+  /* ── Changes (update cards) ── */
+
+  .changes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: var(--space-sm);
+  }
+
+  .change-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-sm);
+    flex-wrap: wrap;
+  }
+
+  .change-key {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-weight: 600;
+    min-width: 50px;
+  }
+
+  .change-before {
+    color: var(--text-muted);
+    text-decoration: line-through;
+  }
+
+  .change-arrow {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+
+  .change-after {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .change-block {
+    margin-bottom: 4px;
+  }
+
+  .change-warning {
+    font-size: 10px;
+    color: var(--warning);
+    margin-left: 6px;
+    font-weight: 500;
+  }
+
+  .change-content {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: var(--bg-surface-hover);
+    border-radius: 4px;
+    white-space: pre-wrap;
+  }
+
+  /* ── Link cards ── */
+
+  .link-display {
+    margin-bottom: var(--space-sm);
+  }
+
+  .link-type-label {
+    font-size: var(--text-xs);
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(100, 116, 139, 0.2);
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
+  /* ── Dedup warning ── */
+
   .dedup-warning {
     font-size: var(--text-sm);
     color: var(--warning);
@@ -404,6 +699,8 @@
     padding: 6px 10px;
     margin-bottom: var(--space-sm);
   }
+
+  /* ── Actions ── */
 
   .card-actions {
     display: flex;
@@ -459,7 +756,8 @@
   .accepted-text { color: var(--success); }
   .error-text { color: var(--error); }
 
-  /* Suggested links */
+  /* ── Suggested links ── */
+
   .suggested-links {
     margin-top: 6px;
     padding: var(--space-sm);
