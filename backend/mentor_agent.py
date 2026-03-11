@@ -51,8 +51,12 @@ _STATUS_PENALTIES: dict[str, float] = {
     "cancelled": -0.25,
     "archived": -0.25,
     "abandoned": -0.25,
+    "superseded": -0.25,
     "parked": -0.10,
 }
+
+# Bootstrap threshold — below this, inject onboarding prompt instead of retrieval.
+_BOOTSTRAP_THRESHOLD = 10
 
 # Rough token budget for the context window.
 _MAX_CONTEXT_TOKENS = 3000
@@ -200,7 +204,7 @@ update means that knowledge is LOST FOREVER.
 Triggers — these MUST produce graph updates:
 - "I cancelled X" / "X isn't happening" → UPDATE X: status → cancelled
 - "I'm going to X" / "I've decided to X" → CREATE task/event/project
-- "Actually, doing Y instead of X" → CREATE Y + UPDATE X: status → superseded
+- "Actually, doing Y instead of X" → CREATE Y + UPDATE X: status → superseded, superseded_by → Y's node_id
 - "I met someone called X" / "X is a …" → CREATE person (or UPDATE if they exist)
 - "X is on [date]" / "moved X to [date]" → UPDATE X: date/deadline change
 - "I finished X" / "X is done" → UPDATE X: status → completed
@@ -252,6 +256,9 @@ Does a node for this already exist in the context?
 DEDUP: A person, place, or concept that already exists → UPDATE or LINK, never create a duplicate.
 BUT: A new task related to an existing project is NOT a duplicate — CREATE the task + LINK it.
 
+UPDATE TARGETING: You can ONLY update nodes that appear in your CONTEXT. If a node isn't in the \
+context, it doesn't exist — CREATE it instead. Never invent node_ids for updates.
+
 TARGETING: New sub-item for a project/goal → CREATE a specific node + LINK to the parent. \
 Do NOT append sub-items to the parent's content. Keep nodes atomic.
 
@@ -276,6 +283,12 @@ RIGHT: → ALWAYS propose the corresponding update/create
 
 WRONG: User shares info about an existing node → create a new note about it
 RIGHT: → update the existing node with append_content or frontmatter changes
+
+WRONG: User says "Actually I'm doing a half marathon instead of the ultra" → create half-marathon only
+RIGHT: → create half-marathon + update ultra: {{status: "superseded", superseded_by: "half-marathon"}}
+
+WRONG: User switches from plan A to plan B → update plan A's content to describe plan B
+RIGHT: → create plan B + update plan A: {{status: "superseded", superseded_by: "plan-b"}} + link between them
 
 ── 5. CASCADE ──
 After proposing an update, check the CONTEXT for connected nodes that reference the changed info \
@@ -496,6 +509,57 @@ def _node_context_minimal(node: dict) -> str:
     return f"- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) [ID: {node['id']}]"
 
 
+_BOOTSTRAP_EMPTY = """\
+BOOTSTRAP MODE — This is a brand new vault with no nodes yet.
+
+Your first job is to get to know this person. Lead a warm, curious conversation that \
+covers their fundamentals. Don't rush — one topic area per message. Ask follow-up \
+questions before moving on.
+
+Start by introducing yourself briefly, then ask about ONE of these:
+- What matters most to them (→ values, beliefs)
+- What they're working toward (→ goals)
+- What keeps them up at night (→ fears)
+
+After each exchange, propose CREATE graph updates for everything discussed. \
+Use specific types (value, belief, goal, fear, habit, skill) — never "note".
+
+You are building the skeleton of their knowledge graph. Every response MUST include \
+graph updates. Aim for 2-4 creates per response."""
+
+_BOOTSTRAP_PARTIAL = """\
+BOOTSTRAP MODE — This vault has {count} node(s). Still building the foundation.
+
+The user has started their graph but it's incomplete. Review the existing nodes below \
+and identify which fundamental areas are still missing:
+- Self domain: values, beliefs, goals, fears, habits, skills
+- People domain: key people in their life
+- Planning domain: active projects, upcoming events
+- Life domain: current situation, recent experiences
+
+Steer the conversation toward gaps. If they have goals but no fears, ask about fears. \
+If they have no people nodes, ask who matters to them. Keep it natural — don't interrogate.
+
+Every response MUST include graph updates for new information shared.
+
+EXISTING NODES:
+{existing_nodes_summary}"""
+
+
+def _bootstrap_context(node_count: int, graph) -> str:
+    """Return a bootstrap prompt when the vault is empty or near-empty."""
+    if node_count == 0:
+        return _BOOTSTRAP_EMPTY
+
+    nodes = graph.get_all_nodes()
+    lines = []
+    for n in sorted(nodes, key=lambda x: x.get("type", "")):
+        lines.append(f'- "{n.get("title", n["id"])}" ({n.get("type", "unknown")})')
+    summary = "\n".join(lines)
+
+    return _BOOTSTRAP_PARTIAL.format(count=node_count, existing_nodes_summary=summary)
+
+
 def _extract_session_topics(history: list[dict], max_messages: int = 5) -> list[str]:
     """Extract recent user messages as additional query strings for session-aware retrieval."""
     user_messages = [m["content"] for m in history if m.get("role") == "user"]
@@ -559,10 +623,16 @@ def _resolve_temporal_query(query: str) -> tuple[date, date] | None:
     return None
 
 
+_INACTIVE_STATUSES = {"cancelled", "completed", "done", "archived", "abandoned", "superseded"}
+
+
 def _get_nodes_in_date_range(graph, start: date, end: date) -> list[dict]:
     """Scan all nodes for matching date/due/deadline fields within range."""
     matches = []
     for node in graph.get_all_nodes():
+        status = str(node.get("status", "") or "").lower()
+        if status in _INACTIVE_STATUSES:
+            continue
         for field in ("date", "due", "deadline"):
             val = node.get(field)
             if not val:
@@ -602,6 +672,12 @@ class MentorAgent:
 
         Returns (context_string, search_results).
         """
+        # Bootstrap check — if vault is nearly empty, skip retrieval and onboard
+        total_nodes = len(self.graph.get_all_nodes())
+        if total_nodes < _BOOTSTRAP_THRESHOLD:
+            logger.info(f"Bootstrap mode: {total_nodes} nodes (threshold {_BOOTSTRAP_THRESHOLD})")
+            return _bootstrap_context(total_nodes, self.graph), []
+
         # Step 0: Temporal query resolution — detect date phrases and find matching nodes
         temporal_node_ids: set[str] = set()
         date_range = _resolve_temporal_query(query)

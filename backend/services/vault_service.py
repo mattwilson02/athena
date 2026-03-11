@@ -259,6 +259,135 @@ class VaultService:
         stats = self.rebuild_fn()
         return {"ok": True, "repaired_files": count, "stats": stats}
 
+    def cascade_check(self, node_id: str, changes: dict) -> list[dict]:
+        """Find nodes affected by a change. Returns cascade proposals.
+
+        Uses two strategies:
+        1. Graph cascade — 1-hop neighbors, check for stale references
+        2. Semantic cascade — vector search for unlinked-but-related nodes
+        """
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return []
+
+        proposals: list[dict] = []
+        seen_ids: set[str] = set()
+
+        # What changed?
+        fm_changes = changes.get("frontmatter", {})
+        new_status = fm_changes.get("status", "").lower() if fm_changes.get("status") else ""
+        status_terminal = new_status in ("cancelled", "completed", "done", "abandoned", "superseded")
+        date_changed = any(fm_changes.get(f) for f in ("date", "due", "deadline"))
+
+        # Only cascade when there's a meaningful change (status or date).
+        # Prevents infinite cascade loops from link-only updates.
+        if not status_terminal and not date_changed:
+            return []
+
+        # --- Step 1: Graph cascade (1-hop neighbors) ---
+        neighbors = self.graph.get_neighbors(node_id, depth=1)
+        for neighbor in neighbors:
+            nid = neighbor["id"]
+            if nid == node_id:
+                continue
+            n_status = str(neighbor.get("status", "") or "").lower()
+            n_type = neighbor.get("type", "")
+
+            if status_terminal and n_status in ("active", "pending", "in-progress", ""):
+                if n_type in ("task", "reminder", "event"):
+                    proposals.append({
+                        "action": "update",
+                        "node_id": nid,
+                        "title": neighbor.get("title", nid),
+                        "type": n_type,
+                        "changes": {"frontmatter": {"status": new_status}},
+                        "reason": f"Linked to '{node.get('title', node_id)}' which was just {new_status}",
+                        "confidence": "graph",
+                    })
+                    seen_ids.add(nid)
+                else:
+                    proposals.append({
+                        "action": "update",
+                        "node_id": nid,
+                        "title": neighbor.get("title", nid),
+                        "type": n_type,
+                        "changes": {},
+                        "reason": f"Linked to '{node.get('title', node_id)}' which was just {new_status} — may need review",
+                        "confidence": "graph",
+                    })
+                    seen_ids.add(nid)
+
+            elif date_changed and n_type in ("task", "reminder", "event"):
+                proposals.append({
+                    "action": "update",
+                    "node_id": nid,
+                    "title": neighbor.get("title", nid),
+                    "type": n_type,
+                    "changes": {},
+                    "reason": f"Linked to '{node.get('title', node_id)}' whose date just changed — check if still correct",
+                    "confidence": "graph",
+                })
+                seen_ids.add(nid)
+
+        # --- Step 2: Semantic cascade (unlinked but related) ---
+        neighbor_ids = {n["id"] for n in neighbors}
+        title = node.get("title", node_id)
+        change_summary = f"{title} {new_status}" if new_status else title
+
+        try:
+            semantic_results = self.vector_index.search(change_summary, n=8)
+        except Exception as e:
+            logger.warning(f"Semantic cascade search failed: {e}")
+            semantic_results = []
+
+        for result in semantic_results:
+            rid = result["id"]
+            if rid == node_id or rid in seen_ids or rid in neighbor_ids:
+                continue
+
+            r_node = self.graph.get_node(rid)
+            if r_node is None:
+                continue
+
+            r_status = str(r_node.get("status", "") or "").lower()
+            r_type = r_node.get("type", "")
+
+            # Apply staleness checks same as graph cascade
+            if status_terminal and r_status in ("active", "pending", "in-progress", ""):
+                if r_type in ("task", "reminder", "event"):
+                    proposals.append({
+                        "action": "update",
+                        "node_id": rid,
+                        "title": r_node.get("title", rid),
+                        "type": r_type,
+                        "changes": {
+                            "frontmatter": {"status": new_status},
+                            "add_edges": [{"target": node_id, "type": _infer_edge_type(r_type, node.get("type", ""))}],
+                        },
+                        "reason": f"Not linked but related to '{title}' which was just {new_status} — still marked {r_status or 'active'}",
+                        "confidence": "semantic",
+                    })
+                    seen_ids.add(rid)
+                    continue
+
+            # No staleness — propose link only
+            proposals.append({
+                "action": "link",
+                "source": rid,
+                "target": node_id,
+                "edge_type": _infer_edge_type(r_type, node.get("type", "")),
+                "title": r_node.get("title", rid),
+                "type": r_type,
+                "reason": f"Semantically related to '{title}' but not linked",
+                "confidence": "semantic",
+            })
+            seen_ids.add(rid)
+
+        # --- Step 3: Limit and rank (graph first, then semantic) ---
+        graph_proposals = [p for p in proposals if p.get("confidence") == "graph"][:3]
+        semantic_proposals = [p for p in proposals if p.get("confidence") == "semantic"][:2]
+        return graph_proposals + semantic_proposals
+
     def find_cross_references(self, node_id: str, max_suggestions: int = 5) -> list[dict]:
         """Find potential links for a node by scanning existing nodes."""
         node = self.graph.get_node(node_id)
@@ -332,6 +461,140 @@ class VaultService:
 
         return suggestions[:max_suggestions]
 
+    def import_proposals(self, source_dir: str = "_backup") -> dict:
+        """Scan archived nodes, validate types, dedup-check, return proposals."""
+        backup_path = Path(self.vault_path) / source_dir
+        if not backup_path.is_dir():
+            return {"proposals": [], "summary": {"total": 0, "ready": 0, "duplicate": 0, "needs_fix": 0}}
+
+        valid_types = set(self.schema.get("type_list", []))
+        proposals = []
+
+        for md_file in sorted(backup_path.rglob("*.md")):
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+
+            fm, body = _split_frontmatter(raw)
+            node_id = fm.get("id", md_file.stem)
+            node_type = fm.get("type", "note")
+            title = fm.get("title", node_id)
+
+            # Strip the markdown heading from body if present
+            content = body.strip()
+            if content.startswith(f"# {title}"):
+                content = content[len(f"# {title}"):].strip()
+
+            # Type validation
+            type_valid = node_type in valid_types
+            suggested_type = _suggest_type(node_type, valid_types) if not type_valid else None
+
+            # Dedup check
+            duplicate = None
+            existing = self.graph.get_node(node_id)
+            if existing:
+                duplicate = {
+                    "match": "exact_id",
+                    "existing_id": existing["id"],
+                    "existing_title": existing.get("title", existing["id"]),
+                }
+            else:
+                try:
+                    matches = self.vector_index.find_duplicates(node_id, title, node_type)
+                    if matches:
+                        duplicate = {
+                            "match": matches[0]["match"],
+                            "existing_id": matches[0]["id"],
+                            "existing_title": matches[0]["title"],
+                            "score": matches[0].get("score", 0),
+                        }
+                except Exception:
+                    pass
+
+            # Determine status
+            if duplicate:
+                status = "duplicate"
+            elif not type_valid:
+                status = "needs_fix"
+            else:
+                status = "ready"
+
+            proposals.append({
+                "source_file": str(md_file.relative_to(Path(self.vault_path))),
+                "node_id": node_id,
+                "title": title,
+                "type": node_type,
+                "type_valid": type_valid,
+                "suggested_type": suggested_type,
+                "content": content,
+                "frontmatter": fm,
+                "duplicate": duplicate,
+                "status": status,
+            })
+
+        summary = {
+            "total": len(proposals),
+            "ready": sum(1 for p in proposals if p["status"] == "ready"),
+            "duplicate": sum(1 for p in proposals if p["status"] == "duplicate"),
+            "needs_fix": sum(1 for p in proposals if p["status"] == "needs_fix"),
+        }
+
+        return {"proposals": proposals, "summary": summary}
+
+    def import_accept(self, node_id: str, source_dir: str = "_backup",
+                      type_override: str | None = None) -> dict:
+        """Accept an import proposal — write the archived node to the vault."""
+        backup_path = Path(self.vault_path) / source_dir
+        if not backup_path.is_dir():
+            return {"error": f"Source directory '{source_dir}' not found", "status": 404}
+
+        # Find the source file
+        source_file = None
+        for md_file in backup_path.rglob("*.md"):
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            fm, _ = _split_frontmatter(raw)
+            if fm.get("id", md_file.stem) == node_id:
+                source_file = md_file
+                break
+
+        if not source_file:
+            return {"error": f"Node '{node_id}' not found in {source_dir}", "status": 404}
+
+        with open(source_file, "r", encoding="utf-8") as f:
+            raw = f.read()
+        fm, body = _split_frontmatter(raw)
+        title = fm.get("title", node_id)
+        node_type = type_override or fm.get("type", "note")
+
+        # Strip the markdown heading from body
+        content = body.strip()
+        if content.startswith(f"# {title}"):
+            content = content[len(f"# {title}"):].strip()
+
+        # Clean frontmatter for fresh import
+        clean_fm = {}
+        for key in ("status", "priority", "context"):
+            if key in fm:
+                clean_fm[key] = fm[key]
+        # Preserve tags
+        if fm.get("tags"):
+            pass  # tags handled separately by write()
+
+        return self.write({
+            "node_id": node_id,
+            "title": title,
+            "type": node_type,
+            "content": content,
+            "frontmatter": clean_fm,
+            "edges": [],
+        })
+
 
 # ------------------------------------------------------------------
 # Module-level helpers (pure functions, no class state needed)
@@ -344,6 +607,26 @@ def _sanitize_id(raw: str) -> str:
     node_id = re.sub(r"[^a-z0-9-]", "", node_id)
     node_id = re.sub(r"-+", "-", node_id).strip("-")
     return node_id
+
+
+_TYPE_REMAPS = {
+    "lesson": "pill",
+    "film": "movie",
+    "show": "movie",
+    "contact": "person",
+    "journal": "daily",
+    "todo": "task",
+    "interest": "skill",
+    "aspiration": "goal",
+}
+
+
+def _suggest_type(invalid_type: str, valid_types: set) -> str | None:
+    """Suggest a valid type for an invalid one using known remaps."""
+    remapped = _TYPE_REMAPS.get(invalid_type.lower())
+    if remapped and remapped in valid_types:
+        return remapped
+    return "note"
 
 
 def _split_frontmatter(content: str) -> tuple[dict, str]:

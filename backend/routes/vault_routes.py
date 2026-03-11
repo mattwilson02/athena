@@ -15,11 +15,16 @@ def vault_write():
     if not data:
         return jsonify({"error": "Request body required"}), 400
 
-    result = current_app.config["vault_service"].write(data)
+    vault_service = current_app.config["vault_service"]
+    result = vault_service.write(data)
 
     status = result.pop("status", 200)
     if "error" in result:
         return jsonify(result), status
+
+    cascade = vault_service.cascade_check(data.get("node_id"), data.get("frontmatter", {}))
+    if cascade:
+        result["cascade_proposals"] = cascade
     return jsonify(result)
 
 
@@ -29,11 +34,16 @@ def vault_update():
     if not data:
         return jsonify({"error": "Request body required"}), 400
 
-    result = current_app.config["vault_service"].update(data)
+    vault_service = current_app.config["vault_service"]
+    result = vault_service.update(data)
 
     status = result.pop("status", 200)
     if "error" in result:
         return jsonify(result), status
+
+    cascade = vault_service.cascade_check(data.get("node_id"), data.get("changes", {}))
+    if cascade:
+        result["cascade_proposals"] = cascade
     return jsonify(result)
 
 
@@ -56,4 +66,32 @@ def vault_audit():
         current_app.config["schema"],
         current_app.config["vault_path"],
     )
+    return jsonify(result)
+
+
+@vault_bp.route("/api/vault/import", methods=["POST"])
+def vault_import():
+    data = request.json or {}
+    source = data.get("source", "_backup")
+    vault_service = current_app.config["vault_service"]
+    result = vault_service.import_proposals(source)
+    return jsonify(result)
+
+
+@vault_bp.route("/api/vault/import/accept", methods=["POST"])
+def vault_import_accept():
+    data = request.json
+    if not data or not data.get("node_id"):
+        return jsonify({"error": "node_id required"}), 400
+
+    vault_service = current_app.config["vault_service"]
+    result = vault_service.import_accept(
+        data["node_id"],
+        data.get("source", "_backup"),
+        data.get("type_override"),
+    )
+
+    status = result.pop("status", 200)
+    if "error" in result:
+        return jsonify(result), status
     return jsonify(result)

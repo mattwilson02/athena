@@ -172,7 +172,11 @@
         {#if msg.graphUpdates?.length > 0}
           <div class="graph-updates">
             {#each msg.graphUpdates as update}
-              <GraphUpdateCard {update} {sessionId} {nodeMap} {onNodeSelect} />
+              <GraphUpdateCard {update} {sessionId} {nodeMap} {onNodeSelect}
+                onCascade={(proposals) => {
+                  msg.graphUpdates = [...msg.graphUpdates, ...proposals];
+                }}
+              />
             {/each}
           </div>
         {/if}

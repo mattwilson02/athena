@@ -2,7 +2,7 @@
   import { writeNode, updateNode, dismissUpdate, getNode } from './api.js';
   import { getTypeColor } from './colors.js';
 
-  let { update, sessionId = null, nodeMap = {}, onNodeSelect = () => {}, onAccepted = () => {}, onDismissed = () => {} } = $props();
+  let { update, sessionId = null, nodeMap = {}, onNodeSelect = () => {}, onAccepted = () => {}, onDismissed = () => {}, onCascade = () => {} } = $props();
   const initialStatus = update._dismissed ? 'dismissed' : update._alreadyInVault ? 'accepted' : 'pending';
   let status = $state(initialStatus);
   let errorMsg = $state('');
@@ -129,16 +129,25 @@
         _status: 'pending',
       }));
     }
+    if (result.cascade_proposals?.length) {
+      onCascade(result.cascade_proposals);
+    }
   }
 
   async function acceptUpdate() {
-    await updateNode(update.node_id, update.changes || {});
+    const result = await updateNode(update.node_id, update.changes || {});
+    if (result?.cascade_proposals?.length) {
+      onCascade(result.cascade_proposals);
+    }
   }
 
   async function acceptLink() {
-    await updateNode(update.source, {
-      add_edges: [{ target: update.target, type: update.type || 'relates_to' }],
+    const result = await updateNode(update.source || update.node_id, {
+      add_edges: [{ target: update.target, type: update.edge_type || update.type || 'relates_to' }],
     });
+    if (result?.cascade_proposals?.length) {
+      onCascade(result.cascade_proposals);
+    }
   }
 
   async function acceptSuggestedLink(link) {
@@ -228,8 +237,17 @@
         {#if update.action !== 'link' && (update.node_id || update.action === 'create')}
           <button class="btn-view-node" onclick={(e) => { e.stopPropagation(); onNodeSelect(update.node_id); }}>View</button>
         {/if}
+        {#if update.confidence}
+          <span class="confidence-badge" class:semantic={update.confidence === 'semantic'}>
+            {update.confidence === 'graph' ? 'Cascade' : 'Suggested'}
+          </span>
+        {/if}
         {#if status === 'accepted'}<span class="collapse-hint">Collapse</span>{/if}
       </div>
+
+      {#if update.reason}
+        <p class="cascade-reason">{update.reason}</p>
+      {/if}
 
       <!-- CREATE card body -->
       {#if update.action === 'create'}
@@ -502,6 +520,31 @@
 
   .card-header.clickable:hover .collapse-hint {
     opacity: 1;
+  }
+
+  .confidence-badge {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--accent-soft, rgba(99, 102, 241, 0.15));
+    color: var(--accent);
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
+  }
+
+  .confidence-badge.semantic {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--text-muted);
+  }
+
+  .cascade-reason {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-style: italic;
+    margin: 0;
+    padding: 0 var(--space-sm);
   }
 
   .btn-view-node {

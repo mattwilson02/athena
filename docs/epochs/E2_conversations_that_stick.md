@@ -5,7 +5,7 @@
 **Vision Stage:** Stage 1 (Foundation)
 **Appetite:** 3 weeks
 **Goal:** Conversations are write operations. Graph updates cascade to neighbors. New users bootstrap from zero.
-**Status:** Shaping
+**Status:** In Progress
 
 ---
 
@@ -111,6 +111,14 @@ When the vault has zero nodes (or below a threshold), inject a bootstrap prompt:
 
 **What success looks like:** Your dad clones the project, opens chat, and Athena walks him through building his graph from scratch.
 
+### 7. 3D Graph View
+**Files:** `frontend/src/lib/GraphView.svelte` (rewrite), new `frontend/src/lib/graph/` directory
+**Spec:** `docs/specs/3d_graph_view.md`
+
+Replace the 2D canvas graph with a 3D Threlte (Three.js + Svelte) visualization. Cosmic/constellation aesthetic — dark background with star-field, glowing color-coded nodes, thin translucent edges, orbit controls. Labels hidden by default, shown on hover/zoom. Domains cluster naturally via 3D force layout. Fly-to camera animation on node select. InstancedMesh + LineSegments for performance.
+
+**What success looks like:** Open the graph tab and see your knowledge as a navigable 3D space — clusters visible, nothing overlapping, feels like exploring a star map.
+
 ### 6. Vault re-import endpoint
 **Files:** `backend/routes/vault_routes.py`, `backend/services/vault_service.py`
 
@@ -132,6 +140,8 @@ When the vault has zero nodes (or below a threshold), inject a bootstrap prompt:
 - Adaptive modes (E4)
 - Permanence scoring in retrieval (E4)
 - Accountability / commitment tracking (E5)
+- Voice interface — speech-to-text input, text-to-speech responses (E4+)
+- Proactive messaging / notifications — scheduled check-ins, reminders, nudges (E4+)
 - Schema V3 full redesign (prep phase — do minimal changes needed for E2)
 - Full vault archive/reset (prep phase — work with existing data)
 
@@ -147,6 +157,7 @@ Ship incrementally. Each item builds on the previous:
 4. **Supersession logic** — extends cascade with replacement semantics
 5. **Bootstrap conversation** — standalone, can be built in parallel with 3-4
 6. **Vault re-import** — depends on validation logic, build last
+7. **3D Graph View** — frontend-only, no backend changes, can be built in parallel with 5-6
 
 ---
 
@@ -159,6 +170,7 @@ Ship incrementally. Each item builds on the previous:
 5. Empty vault → first conversation walks fundamentals → 6+ seed nodes
 6. Import archived nodes → validation + dedup + correction proposals
 7. All existing tests pass + new tests for cascade, bootstrap, import
+8. 3D graph view — navigable, clusters visible, labels on hover, fly-to on select, no overlap
 
 ---
 

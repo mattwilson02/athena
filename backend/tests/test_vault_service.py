@@ -16,6 +16,7 @@ from services.vault_service import (
     _dedup_sections,
     _add_wikilink_to_section,
     _infer_edge_type,
+    _suggest_type,
 )
 
 
@@ -32,6 +33,7 @@ def _make_service(tmp_vault, schema, graph):
     vector_index = MagicMock()
     vector_index.rebuild = MagicMock()
     vector_index.search = MagicMock(return_value=[])
+    vector_index.find_duplicates = MagicMock(return_value=[])
 
     def rebuild():
         nodes, edges = parser.parse()
@@ -347,3 +349,151 @@ class TestWriteRoundtrip:
 
         node_edges = [e for e in edges if e[0] == "roundtrip-test"]
         assert any(e[1] == "alice" and e[2] == "involves" for e in node_edges)
+
+
+# ---------------------------------------------------------------------------
+# Import tests
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestType:
+
+    def test_known_remap(self):
+        valid = {"pill", "movie", "person", "goal", "note"}
+        assert _suggest_type("lesson", valid) == "pill"
+        assert _suggest_type("film", valid) == "movie"
+        assert _suggest_type("contact", valid) == "person"
+        assert _suggest_type("aspiration", valid) == "goal"
+
+    def test_unknown_falls_back_to_note(self):
+        valid = {"goal", "note"}
+        assert _suggest_type("widget", valid) == "note"
+
+    def test_case_insensitive(self):
+        valid = {"pill", "note"}
+        assert _suggest_type("LESSON", valid) == "pill"
+
+
+class TestImportProposals:
+
+    def _setup_backup(self, tmp_vault):
+        """Create backup files for import testing."""
+        backup = tmp_vault / "_backup" / "v1"
+        backup.mkdir(parents=True, exist_ok=True)
+
+        # Valid node — should be "ready"
+        (backup / "cape-town.md").write_text(
+            "---\nid: cape-town\ntype: note\ntitle: Cape Town\n"
+            "tags:\n  - travel\n---\n\n# Cape Town\n\nGreat city.\n"
+        )
+
+        # Duplicate node — same ID as existing "alice"
+        (backup / "alice.md").write_text(
+            "---\nid: alice\ntype: person\ntitle: Alice Duplicate\n---\n\n# Alice Duplicate\n"
+        )
+
+        # Invalid type — should be "needs_fix"
+        (backup / "lesson-node.md").write_text(
+            "---\nid: lesson-node\ntype: lesson\ntitle: Life Lesson\n---\n\n# Life Lesson\n\nSomething learned.\n"
+        )
+
+        return backup
+
+    def test_proposals_returns_all_nodes(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_proposals("_backup/v1")
+
+        assert result["summary"]["total"] == 3
+        ids = {p["node_id"] for p in result["proposals"]}
+        assert "cape-town" in ids
+        assert "alice" in ids
+        assert "lesson-node" in ids
+
+    def test_valid_node_is_ready(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_proposals("_backup/v1")
+
+        cape_town = next(p for p in result["proposals"] if p["node_id"] == "cape-town")
+        assert cape_town["status"] == "ready"
+        assert cape_town["type_valid"] is True
+        assert cape_town["duplicate"] is None
+
+    def test_duplicate_node_flagged(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_proposals("_backup/v1")
+
+        alice = next(p for p in result["proposals"] if p["node_id"] == "alice")
+        assert alice["status"] == "duplicate"
+        assert alice["duplicate"]["match"] == "exact_id"
+
+    def test_invalid_type_flagged(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_proposals("_backup/v1")
+
+        lesson = next(p for p in result["proposals"] if p["node_id"] == "lesson-node")
+        assert lesson["status"] == "needs_fix"
+        assert lesson["type_valid"] is False
+        # "lesson" isn't in the test schema's type_list, so suggested_type should be "note" (fallback)
+        assert lesson["suggested_type"] is not None
+
+    def test_missing_source_dir_returns_empty(self, tmp_vault, schema, graph):
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_proposals("_backup/nonexistent")
+        assert result["summary"]["total"] == 0
+
+    def test_summary_counts(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_proposals("_backup/v1")
+
+        assert result["summary"]["ready"] == 1
+        assert result["summary"]["duplicate"] == 1
+        assert result["summary"]["needs_fix"] == 1
+
+
+class TestImportAccept:
+
+    def _setup_backup(self, tmp_vault):
+        backup = tmp_vault / "_backup" / "v1"
+        backup.mkdir(parents=True, exist_ok=True)
+        (backup / "cape-town.md").write_text(
+            "---\nid: cape-town\ntype: note\ntitle: Cape Town\n"
+            "tags:\n  - travel\n---\n\n# Cape Town\n\nGreat city.\n"
+        )
+        return backup
+
+    def test_accept_writes_node(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_accept("cape-town", "_backup/v1")
+
+        assert result.get("ok") is True
+        assert (tmp_vault / "Knowledge" / "Notes" / "cape-town.md").exists()
+
+    def test_accept_with_type_override(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_accept("cape-town", "_backup/v1", type_override="goal")
+
+        assert result.get("ok") is True
+        filepath = tmp_vault / "Self" / "Goals" / "cape-town.md"
+        assert filepath.exists()
+
+    def test_accept_nonexistent_node(self, tmp_vault, schema, graph):
+        self._setup_backup(tmp_vault)
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_accept("nonexistent", "_backup/v1")
+
+        assert "error" in result
+        assert result["status"] == 404
+
+    def test_accept_nonexistent_source_dir(self, tmp_vault, schema, graph):
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.import_accept("anything", "_backup/nonexistent")
+
+        assert "error" in result
+        assert result["status"] == 404
