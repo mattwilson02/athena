@@ -179,6 +179,8 @@ Telegram sessions use a **chat ID allowlist** — only IDs listed in `config.yam
 - `POST /api/vault/rebuild` — rebuild graph + vector indexes
 - `POST /api/vault/repair` — walk vault and fix corrupted files
 - `POST /api/vault/audit` — scan vault for stale statuses, orphans, broken wikilinks, type mismatches
+- `POST /api/vault/import` — scan `_backup/` for archived nodes, validate types, dedup, return proposals
+- `POST /api/vault/import/accept` — accept a single import proposal `{node_id, source, type_override}`
 
 ## Code Style
 

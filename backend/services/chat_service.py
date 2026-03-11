@@ -53,8 +53,9 @@ class ChatService:
             logger.error("Network error reaching Claude API")
             return {"error": "Can't reach Claude right now. Check your connection.", "status": 503}
 
-        # Post-process: dedup check on create proposals
+        # Post-process: dedup check + supersession validation
         graph_updates = self._dedup_check(result["graph_updates"])
+        graph_updates = self._validate_supersession(graph_updates)
 
         # Save assistant message
         self.chat_store.append_message(session_id, {
@@ -91,6 +92,7 @@ class ChatService:
                     yield ("text", data)
                 elif event_type == "done":
                     graph_updates = self._dedup_check(data["graph_updates"])
+                    graph_updates = self._validate_supersession(graph_updates)
                     self.chat_store.append_message(session_id, {
                         "role": "assistant",
                         "content": data["full_response"],
@@ -205,6 +207,16 @@ class ChatService:
         if result.get("error"):
             return {"response": f"Failed to {action} \"{title}\": {result['error']}"}
 
+        # Queue cascade proposals as additional pending updates
+        cascade = result.get("cascade_proposals", [])
+        if not cascade and self.vault_service:
+            node_id = update.get("node_id", "")
+            changes = update.get("changes", update.get("frontmatter", {}))
+            cascade = self.vault_service.cascade_check(node_id, changes)
+        if cascade:
+            existing = self.chat_store.get_pending_updates(session_id)
+            self.chat_store.set_pending_updates(session_id, existing + cascade)
+
         # Check if more pending
         remaining = self.chat_store.get_pending_updates(session_id)
         reply = f"Saved: {action} \"{title}\""
@@ -246,9 +258,18 @@ class ChatService:
         return {"response": reply}
 
     def _dedup_check(self, updates: list[dict]) -> list[dict]:
-        """Annotate create actions with potential duplicate info."""
+        """Annotate create actions with potential duplicate info.
+        Also drops updates targeting non-existent nodes (AI hallucination guard).
+        """
         enriched = []
         for update in updates:
+            # Guard: drop updates/links targeting nodes that don't exist
+            if update.get("action") in ("update", "link"):
+                target_id = update.get("node_id", "")
+                if target_id and not self.graph.get_node(target_id):
+                    logger.warning(f"Dropped {update.get('action')} targeting non-existent node: {target_id}")
+                    continue
+
             if update.get("action") != "create":
                 enriched.append(update)
                 continue
@@ -282,3 +303,32 @@ class ChatService:
             enriched.append(update)
 
         return enriched
+
+    def _validate_supersession(self, updates: list[dict]) -> list[dict]:
+        """If a batch contains a create + an update with status: superseded,
+        ensure the update has superseded_by pointing to the new node."""
+        creates = {u["node_id"]: u for u in updates if u.get("action") == "create" and u.get("node_id")}
+
+        for update in updates:
+            if update.get("action") != "update":
+                continue
+            changes = update.get("changes", {})
+            fm = changes.get("frontmatter", {})
+            if fm.get("status") != "superseded":
+                continue
+            # Already has superseded_by? Skip.
+            if fm.get("superseded_by"):
+                continue
+
+            # If exactly one create in the batch, it's the replacement
+            if len(creates) == 1:
+                fm["superseded_by"] = list(creates.keys())[0]
+            # Multiple creates — match by edge targeting
+            else:
+                for cid, create in creates.items():
+                    edges = create.get("edges", [])
+                    if any(e.get("target") == update.get("node_id") for e in edges):
+                        fm["superseded_by"] = cid
+                        break
+
+        return updates

@@ -310,7 +310,8 @@
     font-size: var(--text-sm); line-height: 1.7; color: var(--text-secondary);
     padding: var(--space-md);
     background: var(--bg-primary); border-radius: var(--radius);
-    max-height: 300px; overflow-y: auto;
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
 
   .content :global(p) { margin-bottom: 0.4em; }
@@ -344,10 +345,10 @@
   }
 
   .neighbor-link {
-    display: flex; align-items: center; gap: var(--space-sm); width: 100%;
-    padding: 6px var(--space-sm); border: none; border-radius: 6px; background: transparent;
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    padding: 4px var(--space-sm); border: none; border-radius: 6px; background: transparent;
     color: var(--text-primary); font-size: var(--text-sm); text-align: left;
-    transition: background var(--transition-fast);
+    transition: background var(--transition-fast); min-width: 0;
   }
   .neighbor-link:hover { background: var(--bg-surface-hover); }
 

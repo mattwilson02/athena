@@ -17,6 +17,8 @@ from mentor_agent import (
     _classify_domains,
     _recency_score,
     _format_date_context,
+    _bootstrap_context,
+    _BOOTSTRAP_THRESHOLD,
     _STATUS_PENALTIES,
     MentorAgent,
 )
@@ -364,3 +366,105 @@ class TestFormatDateContext:
         result = _format_date_context(node, today=self.TODAY)
         assert "Date:" in result
         assert "Created:" in result
+
+
+# ── Bootstrap conversation ──
+
+
+class TestBootstrapContext:
+    """Test _bootstrap_context with empty and partial vaults."""
+
+    class FakeGraph:
+        def __init__(self, nodes):
+            self._nodes = nodes
+
+        def get_all_nodes(self):
+            return self._nodes
+
+    def test_empty_vault_returns_bootstrap_prompt(self):
+        graph = self.FakeGraph([])
+        result = _bootstrap_context(0, graph)
+        assert "BOOTSTRAP MODE" in result
+        assert "brand new vault" in result
+        assert "no nodes" in result
+
+    def test_partial_vault_lists_existing_nodes(self):
+        nodes = [
+            {"id": "discipline", "title": "Discipline", "type": "value"},
+            {"id": "run-marathon", "title": "Run a Marathon", "type": "goal"},
+        ]
+        graph = self.FakeGraph(nodes)
+        result = _bootstrap_context(2, graph)
+        assert "BOOTSTRAP MODE" in result
+        assert "2 node(s)" in result
+        assert '"Discipline" (value)' in result
+        assert '"Run a Marathon" (goal)' in result
+
+    def test_partial_vault_mentions_gaps(self):
+        nodes = [{"id": "test", "title": "Test", "type": "goal"}]
+        graph = self.FakeGraph(nodes)
+        result = _bootstrap_context(1, graph)
+        assert "gaps" in result.lower() or "missing" in result.lower()
+
+    def test_threshold_is_10(self):
+        assert _BOOTSTRAP_THRESHOLD == 10
+
+
+class TestBootstrapInGetContext:
+    """Test that get_context returns bootstrap prompt when vault is small."""
+
+    def _make_agent(self, nodes):
+        from unittest.mock import MagicMock
+
+        class FakeGraph:
+            def __init__(self, nodes):
+                self._nodes = nodes
+
+            def get_all_nodes(self):
+                return self._nodes
+
+            def get_node(self, nid):
+                return next((n for n in self._nodes if n["id"] == nid), None)
+
+            def get_neighbors(self, nid, depth=1):
+                return []
+
+            def get_neighbors_by_hop(self, nid, depth=2):
+                return {}
+
+            def get_degree(self, nid):
+                return 0
+
+        schema = {"type_list": ["goal", "value", "fear"], "types": {}}
+        graph = FakeGraph(nodes)
+        vector_index = MagicMock()
+        vector_index.search.return_value = []
+        client = MagicMock()
+
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.graph = graph
+        agent.vector_index = vector_index
+        agent.schema = schema
+        agent.client = client
+        agent.system_prompt_template = "test {context} {today}"
+        agent.model = "test-model"
+        return agent
+
+    def test_empty_vault_triggers_bootstrap(self):
+        agent = self._make_agent([])
+        context, results = agent.get_context("hello")
+        assert "BOOTSTRAP MODE" in context
+        assert results == []
+
+    def test_partial_vault_triggers_bootstrap(self):
+        nodes = [{"id": f"node-{i}", "title": f"Node {i}", "type": "goal"} for i in range(5)]
+        agent = self._make_agent(nodes)
+        context, results = agent.get_context("hello")
+        assert "BOOTSTRAP MODE" in context
+        assert "5 node(s)" in context
+
+    def test_full_vault_skips_bootstrap(self):
+        nodes = [{"id": f"node-{i}", "title": f"Node {i}", "type": "goal"} for i in range(15)]
+        agent = self._make_agent(nodes)
+        context, results = agent.get_context("hello")
+        assert "BOOTSTRAP MODE" not in context

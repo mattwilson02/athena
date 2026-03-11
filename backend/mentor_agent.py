@@ -51,8 +51,12 @@ _STATUS_PENALTIES: dict[str, float] = {
     "cancelled": -0.25,
     "archived": -0.25,
     "abandoned": -0.25,
+    "superseded": -0.25,
     "parked": -0.10,
 }
+
+# Bootstrap threshold — below this, inject onboarding prompt instead of retrieval.
+_BOOTSTRAP_THRESHOLD = 10
 
 # Rough token budget for the context window.
 _MAX_CONTEXT_TOKENS = 3000
@@ -186,52 +190,123 @@ def load_insights_prompt(vault_path: str | None = None) -> str:
     return default
 
 
-_DEDUP_RULES = """\
-DEDUPLICATION:
-- Before proposing a "create", check the CONTEXT above for existing nodes that match.
-- If a person, place, or concept already exists in the graph, use "update" or "link" instead of \
-creating a duplicate.
-- When updating an existing node, use the "update" action with its existing node_id.
-- Dedup means "don't create duplicates of the same thing" — it does NOT mean "fold everything \
-into existing nodes". A new task related to a project is NOT a duplicate of the project — create \
-the task and link it."""
+_GRAPH_INSTRUCTIONS = """\
+GRAPH UPDATE RULES — READ ALL OF THIS BEFORE RESPONDING.
 
-_FORMAT_SPEC = """\
-GRAPH UPDATE FORMAT:
-CRITICAL: The "type" field MUST be one of these exact values: {type_enum}
-Do NOT invent new types. If nothing fits perfectly, pick the closest match.
-TYPE PRIORITY: "note" and "idea" are LAST RESORT. NEVER use them if a specific type fits. Check this:
-- A film or movie → "movie" (NOT "note")
-- A quote or saying → "quote" (NOT "note" or "idea")
-- A life lesson, mental model, or realization → "pill" (NOT "note" or "belief")
-- A workout plan or routine → "habit" (NOT "note")
-- A project update → "project" (NOT "note")
-- A salary/money fact → "budget" or "expense" (NOT "note")
-- An observation about someone → update the "person" node (NOT "note")
-- A place detail → "place" (NOT "note")
-- A book/article takeaway → "idea" or update the "book"/"article"
-- A future plan or to-do → "task" or "project" (NOT "note")
-If you catch yourself typing "note", stop and reconsider.
+Valid types: {type_enum}
+Do NOT invent types. Pick from the list above. "note" and "idea" are LAST RESORT.
 
-WRITE AGGRESSIVENESS — CONVERSATIONS ARE WRITE OPERATIONS:
-- Any change to plans, schedules, status, or decisions MUST produce graph updates.
-- Cancel or reschedule → update node status/frontmatter (set cancelled/superseded/completed).
-- New plan or commitment → create a node.
-- Changed priority or timing → update frontmatter fields.
-- If you respond to a user's change without proposing a graph update, that knowledge is LOST.
+── 1. WHEN TO WRITE ──
+Conversations are write operations. If the user's message changes the state of the world — plans, \
+knowledge, relationships, decisions — you MUST propose graph updates. Responding without a graph \
+update means that knowledge is LOST FOREVER.
 
-TARGETING — CREATE SPECIFIC NODES, DON'T UPDATE HUBS:
-- New task related to a project → CREATE a task node + LINK to the project. Do NOT append to the \
-project's content.
-- Only UPDATE a node when you are explicitly adding information to THAT specific node.
-- Prefer specific nodes (task, event, person) over generic ones (project, goal).
-- When a plan is replaced, update the old node's status to "cancelled" or "superseded" — don't \
-leave multiple active versions.
+Triggers — these MUST produce graph updates:
+- "I cancelled X" / "X isn't happening" → UPDATE X: status → cancelled
+- "I'm going to X" / "I've decided to X" → CREATE task/event/project
+- "Actually, doing Y instead of X" → CREATE Y + UPDATE X: status → superseded, superseded_by → Y's node_id
+- "I met someone called X" / "X is a …" → CREATE person (or UPDATE if they exist)
+- "X is on [date]" / "moved X to [date]" → UPDATE X: date/deadline change
+- "I finished X" / "X is done" → UPDATE X: status → completed
+- "I learned that…" / "key takeaway:" → CREATE pill (not note)
+- "I watched X" / "I read X" → CREATE movie/book
+- "X costs Y" / "I spent Y on X" → CREATE expense or UPDATE budget
+- Opinion about existing node → UPDATE that node: append_content
+- Describes a place → CREATE place or experience
+- "I'm worried about X" / "I'm afraid of X" → CREATE fear
+- "I believe X" / "X is important to me" → CREATE belief or value
 
-CASCADE — CHECK CONNECTED NODES:
-- When you update a node, check its graph neighbors in the CONTEXT above.
-- If connected nodes reference the changed information (old timing, old status, old plan), \
-propose updates to those too.
+If the user is just chatting (no state change, no new info worth capturing), no graph update needed.
+
+── 2. WHAT TYPE ──
+Walk this decision tree top-to-bottom. Use the FIRST match:
+
+Is it about a specific person? → person
+Is it a scheduled event with a date? → event
+Is it a one-off task or to-do? → task
+Is it a multi-step effort with sub-tasks? → project
+Is it a recurring routine or practice? → habit
+Is it a film or show they watched? → movie
+Is it a book or article they read? → book / article
+Is it something they spent money on? → expense
+Is it a recurring payment? → subscription
+Is it a budget or financial plan? → budget
+Is it a place (city, restaurant, bar, etc.)? → place
+Is it a life lesson, mental model, or realization? → pill
+Is it a memorable quote or saying? → quote
+Is it a fear or anxiety? → fear
+Is it a core belief? → belief
+Is it a personal value? → value
+Is it a goal or ambition? → goal
+Is it a skill they have or want? → skill
+Is it a life experience or memory? → experience / memory
+Is it a daily journal entry? → daily
+Is it a reminder (date-triggered)? → reminder
+Is it an abstract concept worth exploring? → idea
+None of the above? → note (genuinely LAST RESORT — if you picked this, re-read the list)
+
+── 3. WHAT ACTION ──
+Check the CONTEXT above for existing nodes BEFORE choosing an action.
+
+Does a node for this already exist in the context?
+  YES, and user wants to change/add to it → action: "update" (use its node_id)
+  YES, and user is connecting it to something new → action: "link"
+  NO, this is genuinely new information → action: "create" + edges to related nodes
+
+DEDUP: A person, place, or concept that already exists → UPDATE or LINK, never create a duplicate.
+BUT: A new task related to an existing project is NOT a duplicate — CREATE the task + LINK it.
+
+UPDATE TARGETING: You can ONLY update nodes that appear in your CONTEXT. If a node isn't in the \
+context, it doesn't exist — CREATE it instead. Never invent node_ids for updates.
+
+TARGETING: New sub-item for a project/goal → CREATE a specific node + LINK to the parent. \
+Do NOT append sub-items to the parent's content. Keep nodes atomic.
+
+MULTI-NODE BATCHES: A single message often mentions multiple entities. Propose creates for ALL \
+of them, not just the "main" one. If someone talks about a plan involving a place and a person, \
+that could be 3 creates (project + place + person) linked together — not just 1 project with \
+everything in its content. After deciding the primary update, scan for other entities (people, \
+places, events, tasks) that don't exist in the CONTEXT and create those too.
+
+── 4. COMMON MISTAKES ──
+WRONG: User says "I cancelled the Italy trip" → create note titled "Cancelled Italy Trip"
+RIGHT: → update italy-trip, changes: {{frontmatter: {{status: "cancelled"}}}}
+
+WRONG: User says "I need to book flights" → update italy-trip, append: "Need to book flights"
+RIGHT: → create task "Book Flights for Italy Trip", edges: [{{target: "italy-trip", type: "part_of"}}]
+
+WRONG: User says "Met Sarah at the gym" → create note "Met Sarah at Gym"
+RIGHT: → create person "Sarah", frontmatter: {{context: "met at gym"}}, edges: [{{target: relevant-node, type: "met_at"}}]
+
+WRONG: User changes plans but you only respond conversationally with no graph update
+RIGHT: → ALWAYS propose the corresponding update/create
+
+WRONG: User shares info about an existing node → create a new note about it
+RIGHT: → update the existing node with append_content or frontmatter changes
+
+WRONG: User says "Actually I'm doing a half marathon instead of the ultra" → create half-marathon only
+RIGHT: → create half-marathon + update ultra: {{status: "superseded", superseded_by: "half-marathon"}}
+
+WRONG: User switches from plan A to plan B → update plan A's content to describe plan B
+RIGHT: → create plan B + update plan A: {{status: "superseded", superseded_by: "plan-b"}} + link between them
+
+── 5. CASCADE ──
+After proposing an update, check the CONTEXT for connected nodes that reference the changed info \
+(old dates, old status, old plans). Propose updates to those too.
+
+── 6. EDGES ──
+Every CREATE must have at least one edge (unless zero related nodes exist in context).
+Pick specific edge types over generic relates_to:
+- Task for a project → part_of
+- Person met at a place → met_at
+- Idea from a book → inspired_by
+- Expense for a subscription → funded_by
+- Task blocking another → blocked_by
+- Belief supporting a goal → supported_by
+- Idea contradicting a belief → contradicts
+
+── 7. FORMAT ──
+Wrap graph updates in <graph_updates> tags after your response text:
 
 <graph_updates>
 [
@@ -244,17 +319,17 @@ propose updates to those too.
     "tags": ["tag1", "tag2"],
     "frontmatter": {{"status": "active", "priority": "high"}},
     "edges": [
-      {{"target": "existing-node-id", "type": "relates_to|blocked_by|supported_by|contradicts|inspired_by|involves|part_of|located_in|funded_by|met_at"}}
+      {{"target": "existing-node-id", "type": "edge_type"}}
     ]
   }},
   {{
     "action": "update",
     "node_id": "existing-node-id",
     "changes": {{
-      "title": "New Title (only if renaming the node)",
-      "content": "Full replacement text (replaces body, use only when rewriting)",
+      "title": "New Title (only if renaming)",
+      "content": "Full replacement (replaces body — use only when rewriting)",
       "frontmatter": {{"status": "active", "company": "Google"}},
-      "append_content": "New information to add (appends, does not replace).",
+      "append_content": "New info to add (appends, does not replace).",
       "add_tags": ["new-tag"],
       "add_edges": [{{"target": "other-node", "type": "relates_to"}}]
     }}
@@ -266,10 +341,7 @@ propose updates to those too.
     "type": "edge_type"
   }}
 ]
-</graph_updates>
-
-Always propose edges to connect new nodes to existing ones. A node without edges is a missed \
-opportunity. Err on the side of proposing — the user can always dismiss."""
+</graph_updates>"""
 
 
 def build_system_prompt(schema: dict, vault_path: str | None = None) -> str:
@@ -277,14 +349,13 @@ def build_system_prompt(schema: dict, vault_path: str | None = None) -> str:
     identity, instructions = _load_soul(vault_path)
     type_rules = generate_type_rules(schema)
     type_enum = "|".join(schema["type_list"])
-    format_spec = _FORMAT_SPEC.replace("{type_enum}", type_enum)
+    graph_instructions = _GRAPH_INSTRUCTIONS.replace("{type_enum}", type_enum)
 
     return "\n\n".join([
         identity,
         instructions,
         type_rules,
-        _DEDUP_RULES,
-        format_spec,
+        graph_instructions,
     ])
 
 
@@ -438,6 +509,57 @@ def _node_context_minimal(node: dict) -> str:
     return f"- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) [ID: {node['id']}]"
 
 
+_BOOTSTRAP_EMPTY = """\
+BOOTSTRAP MODE — This is a brand new vault with no nodes yet.
+
+Your first job is to get to know this person. Lead a warm, curious conversation that \
+covers their fundamentals. Don't rush — one topic area per message. Ask follow-up \
+questions before moving on.
+
+Start by introducing yourself briefly, then ask about ONE of these:
+- What matters most to them (→ values, beliefs)
+- What they're working toward (→ goals)
+- What keeps them up at night (→ fears)
+
+After each exchange, propose CREATE graph updates for everything discussed. \
+Use specific types (value, belief, goal, fear, habit, skill) — never "note".
+
+You are building the skeleton of their knowledge graph. Every response MUST include \
+graph updates. Aim for 2-4 creates per response."""
+
+_BOOTSTRAP_PARTIAL = """\
+BOOTSTRAP MODE — This vault has {count} node(s). Still building the foundation.
+
+The user has started their graph but it's incomplete. Review the existing nodes below \
+and identify which fundamental areas are still missing:
+- Self domain: values, beliefs, goals, fears, habits, skills
+- People domain: key people in their life
+- Planning domain: active projects, upcoming events
+- Life domain: current situation, recent experiences
+
+Steer the conversation toward gaps. If they have goals but no fears, ask about fears. \
+If they have no people nodes, ask who matters to them. Keep it natural — don't interrogate.
+
+Every response MUST include graph updates for new information shared.
+
+EXISTING NODES:
+{existing_nodes_summary}"""
+
+
+def _bootstrap_context(node_count: int, graph) -> str:
+    """Return a bootstrap prompt when the vault is empty or near-empty."""
+    if node_count == 0:
+        return _BOOTSTRAP_EMPTY
+
+    nodes = graph.get_all_nodes()
+    lines = []
+    for n in sorted(nodes, key=lambda x: x.get("type", "")):
+        lines.append(f'- "{n.get("title", n["id"])}" ({n.get("type", "unknown")})')
+    summary = "\n".join(lines)
+
+    return _BOOTSTRAP_PARTIAL.format(count=node_count, existing_nodes_summary=summary)
+
+
 def _extract_session_topics(history: list[dict], max_messages: int = 5) -> list[str]:
     """Extract recent user messages as additional query strings for session-aware retrieval."""
     user_messages = [m["content"] for m in history if m.get("role") == "user"]
@@ -501,10 +623,16 @@ def _resolve_temporal_query(query: str) -> tuple[date, date] | None:
     return None
 
 
+_INACTIVE_STATUSES = {"cancelled", "completed", "done", "archived", "abandoned", "superseded"}
+
+
 def _get_nodes_in_date_range(graph, start: date, end: date) -> list[dict]:
     """Scan all nodes for matching date/due/deadline fields within range."""
     matches = []
     for node in graph.get_all_nodes():
+        status = str(node.get("status", "") or "").lower()
+        if status in _INACTIVE_STATUSES:
+            continue
         for field in ("date", "due", "deadline"):
             val = node.get(field)
             if not val:
@@ -544,6 +672,12 @@ class MentorAgent:
 
         Returns (context_string, search_results).
         """
+        # Bootstrap check — if vault is nearly empty, skip retrieval and onboard
+        total_nodes = len(self.graph.get_all_nodes())
+        if total_nodes < _BOOTSTRAP_THRESHOLD:
+            logger.info(f"Bootstrap mode: {total_nodes} nodes (threshold {_BOOTSTRAP_THRESHOLD})")
+            return _bootstrap_context(total_nodes, self.graph), []
+
         # Step 0: Temporal query resolution — detect date phrases and find matching nodes
         temporal_node_ids: set[str] = set()
         date_range = _resolve_temporal_query(query)

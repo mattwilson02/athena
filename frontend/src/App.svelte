@@ -1,5 +1,5 @@
 <script>
-  import { listSessions, createSession, getSchema } from './lib/api.js';
+  import { listSessions, createSession, getSchema, getGraph } from './lib/api.js';
   import Sidebar from './lib/Sidebar.svelte';
   import ChatView from './lib/ChatView.svelte';
   import GraphView from './lib/GraphView.svelte';
@@ -14,6 +14,7 @@
   let selectedGraphNode = $state(null);
   let connectionError = $state(false);
   let showSearch = $state(false);
+  let nodeMap = $state({});
 
   async function loadSessions() {
     try {
@@ -36,6 +37,19 @@
       connectionError = false;
     } catch {
       // Backend not ready
+    }
+  }
+
+  async function loadNodeMap() {
+    try {
+      const graphData = await getGraph();
+      const map = {};
+      for (const n of graphData.nodes || []) {
+        map[n.id] = n;
+      }
+      nodeMap = map;
+    } catch {
+      // Graph not ready
     }
   }
 
@@ -76,6 +90,7 @@
   $effect(() => {
     loadSessions();
     loadSchema();
+    loadNodeMap();
   });
 
   $effect(() => {
@@ -111,8 +126,9 @@
     {#if currentView === 'chat'}
       <ChatView
         sessionId={currentSessionId}
-        onSessionUpdate={loadSessions}
+        onSessionUpdate={() => { loadSessions(); loadNodeMap(); }}
         onNodeSelect={handleNodeSelect}
+        {nodeMap}
       />
     {:else if currentView === 'graph'}
       <GraphView {schema} filter={graphFilter} selectedNode={selectedGraphNode} />
