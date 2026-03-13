@@ -94,12 +94,13 @@
         messages = [...messages.slice(0, -1), { ...last, content: streamingContent }];
       },
       onDone(event) {
-        // Finalize the streaming message with graph updates and relevant nodes
+        // Finalize the streaming message with graph updates, relevant nodes, and conflicts
         messages = [...messages.slice(0, -1), {
           role: 'assistant',
           content: event.response,
           graphUpdates: event.graph_updates || [],
           relevantNodes: event.relevant_nodes || [],
+          conflicts: event.conflicts || [],
         }];
         isLoading = false;
         isStreaming = false;
@@ -152,6 +153,20 @@
 
     {#each messages as msg}
       <div class="message {msg.role}" class:error={msg.isError}>
+        {#if msg.conflicts?.length > 0}
+          <div class="conflicts">
+            <span class="conflicts-label">Conflicts detected</span>
+            {#each msg.conflicts as conflict}
+              <div class="conflict-chip" class:hard={conflict.severity === 'hard'} class:soft={conflict.severity === 'soft'}>
+                <span class="conflict-severity">{conflict.severity}</span>
+                <span class="conflict-type">{conflict.conflict_type.replace(/_/g, ' ')}</span>
+                <button class="conflict-node" onclick={() => onNodeSelect(conflict.node_id)}>
+                  {conflict.title}
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
         <div class="bubble">
           {#if msg.role === 'assistant' && !msg.isError}
             {@html formatText(msg.content)}{#if msg.isStreaming}<span class="stream-cursor"></span>{/if}
@@ -481,6 +496,81 @@
   @keyframes blink {
     0%, 100% { opacity: 1; }
     50% { opacity: 0; }
+  }
+
+  /* ── Conflicts ── */
+
+  .conflicts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+    align-items: center;
+  }
+
+  .conflicts-label {
+    font-size: var(--text-xs);
+    color: var(--warning);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-right: 2px;
+    font-weight: 600;
+  }
+
+  .conflict-chip {
+    font-size: var(--text-xs);
+    padding: 5px 10px;
+    border-radius: 6px;
+    background: var(--warning-soft);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    animation: msg-in 0.3s ease;
+  }
+
+  .conflict-chip.hard {
+    background: var(--error-soft);
+    border-color: rgba(248, 113, 113, 0.3);
+  }
+
+  .conflict-severity {
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .conflict-chip.hard .conflict-severity {
+    color: var(--error);
+    background: rgba(248, 113, 113, 0.15);
+  }
+
+  .conflict-chip.soft .conflict-severity {
+    color: var(--warning);
+    background: rgba(245, 158, 11, 0.15);
+  }
+
+  .conflict-type {
+    color: var(--text-secondary);
+  }
+
+  .conflict-node {
+    color: var(--text-primary);
+    font-weight: 500;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: rgba(255, 255, 255, 0.2);
+    transition: color var(--transition-fast);
+  }
+
+  .conflict-node:hover {
+    color: var(--accent);
   }
 
   /* ── Graph updates ── */

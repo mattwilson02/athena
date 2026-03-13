@@ -902,7 +902,39 @@ class MentorAgent:
         )
         return context, top_results
 
-    def chat_stream(self, message: str, conversation_history: list[dict]):
+    def _build_dismissed_note(self, dismissed_ids: list[str]) -> str:
+        """Build a system prompt note about dismissed proposals."""
+        if not dismissed_ids:
+            return ""
+        # Cap at 10 most recent to avoid prompt bloat
+        recent = dismissed_ids[-10:]
+        ids = "\n".join(f"- {nid}" for nid in recent)
+        return (
+            f"\n\nDISMISSED PROPOSALS (user rejected these — do NOT reference or update them):\n"
+            f"{ids}\n"
+            f"These nodes do NOT exist. Do not propose updates to them unless the user explicitly asks again."
+        )
+
+    @staticmethod
+    def _build_conflict_note(conflicts: list[dict]) -> str:
+        """Build a system prompt note about detected conflicts."""
+        if not conflicts:
+            return ""
+        lines = []
+        for c in conflicts:
+            severity = c.get("severity", "soft").upper()
+            lines.append(f"- [{severity}] {c['conflict_type']}: {c.get('explanation', '')} (node: {c.get('title', c.get('node_id', '?'))})")
+        conflict_text = "\n".join(lines)
+        return (
+            f"\n\nCONFLICT DETECTION — the following conflicts were detected between the user's message and their existing graph:\n"
+            f"{conflict_text}\n"
+            f"You MUST acknowledge these conflicts in your response. For HARD conflicts, challenge the user directly. "
+            f"For SOFT conflicts, raise them as considerations. Do not ignore detected conflicts."
+        )
+
+    def chat_stream(self, message: str, conversation_history: list[dict],
+                    dismissed_ids: list[str] | None = None,
+                    conflicts: list[dict] | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -912,6 +944,8 @@ class MentorAgent:
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
+        system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_conflict_note(conflicts or [])
         messages = conversation_history + [{"role": "user", "content": message}]
 
         full_text = ""
@@ -983,14 +1017,20 @@ class MentorAgent:
             ],
         })
 
-    def chat(self, message: str, conversation_history: list[dict]) -> dict:
+    def chat(self, message: str, conversation_history: list[dict],
+             dismissed_ids: list[str] | None = None,
+             conflicts: list[dict] | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
+        dismissed_ids: node IDs the user dismissed this session — injected into prompt.
+        conflicts: detected conflicts between the message and existing graph nodes.
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
+        system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_conflict_note(conflicts or [])
 
         # Build messages: prior history + current user message
         messages = conversation_history + [{"role": "user", "content": message}]

@@ -468,3 +468,44 @@ class TestBootstrapInGetContext:
         agent = self._make_agent(nodes)
         context, results = agent.get_context("hello")
         assert "BOOTSTRAP MODE" not in context
+
+
+class TestDismissedNote:
+    """Test that _build_dismissed_note produces correct output."""
+
+    def _make_agent(self):
+        from unittest.mock import MagicMock
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.schema = {"type_list": ["goal"], "types": {}}
+        agent.client = MagicMock()
+        agent.system_prompt_template = "test {context} {today}"
+        agent.model = "test-model"
+        return agent
+
+    def test_empty_dismissed_returns_empty(self):
+        agent = self._make_agent()
+        assert agent._build_dismissed_note([]) == ""
+
+    def test_none_dismissed_returns_empty(self):
+        agent = self._make_agent()
+        assert agent._build_dismissed_note([]) == ""
+
+    def test_dismissed_ids_in_note(self):
+        agent = self._make_agent()
+        note = agent._build_dismissed_note(["guitar-project", "daily-scales"])
+        assert "DISMISSED PROPOSALS" in note
+        assert "guitar-project" in note
+        assert "daily-scales" in note
+        assert "do NOT reference" in note.lower() or "do NOT reference" in note
+
+    def test_caps_at_10(self):
+        agent = self._make_agent()
+        ids = [f"node-{i}" for i in range(15)]
+        note = agent._build_dismissed_note(ids)
+        # Should only include the last 10 (most recent)
+        assert "node-5" in note
+        assert "node-14" in note
+        assert "node-0" not in note
+        assert "node-4" not in note

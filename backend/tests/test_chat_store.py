@@ -154,6 +154,24 @@ class TestDismiss:
     def test_dismiss_not_found(self, chat_store):
         assert chat_store.dismiss_update("00000000-0000-0000-0000-000000000000", "key") is False
 
+    def test_undismiss_update(self, chat_store):
+        session = chat_store.create_session()
+        chat_store.dismiss_update(session["id"], "node-a")
+        chat_store.dismiss_update(session["id"], "node-b")
+        chat_store.undismiss_update(session["id"], "node-a")
+        loaded = chat_store.get_session(session["id"])
+        assert "node-a" not in loaded["dismissed_updates"]
+        assert "node-b" in loaded["dismissed_updates"]
+
+    def test_undismiss_not_present(self, chat_store):
+        """Undismissing a node that was never dismissed is a no-op."""
+        session = chat_store.create_session()
+        ok = chat_store.undismiss_update(session["id"], "never-dismissed")
+        assert ok is True
+
+    def test_undismiss_not_found(self, chat_store):
+        assert chat_store.undismiss_update("00000000-0000-0000-0000-000000000000", "key") is False
+
 
 class TestSessionNodeIds:
 
