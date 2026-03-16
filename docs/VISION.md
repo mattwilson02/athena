@@ -321,6 +321,7 @@ Key capabilities:
 - External tool integrations (fitness, finance, task managers)
 - Suggest-then-act workflow — Athena proposes, user approves, Athena executes
 - Trust threshold evolves through testing and experience
+- Multi-agent orchestration — specialist agents (retrieval, conflict, synthesis) replace the single monolithic Claude call, enabling parallel execution and model-appropriate routing
 
 ### Stage 3: Ambient
 **Scope:** Full life management

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,13 @@ _SPENDING_SIGNALS = [
 _AVOIDANCE_SIGNALS = [
     "avoid", "skip", "not going to", "can't face", "cant face",
     "too scared", "not ready", "put off", "postpone", "dodge",
+]
+
+_NEW_COMMITMENT_SIGNALS = [
+    "start", "begin", "pick up", "take on", "add",
+    "learn", "try", "launch", "kick off",
+    "sign up", "enroll", "commit to",
+    "new goal", "new project", "new habit",
 ]
 
 # Types eligible for conflict checking
@@ -115,6 +122,31 @@ def detect_conflicts(
             "type": node.get("type", "unknown"),
             **result,
         })
+
+    # Stage 5: Obligation surfacing — new commitment + overloaded plate
+    if _has_new_commitment_signal(message_lower):
+        obligations = _gather_obligations(graph)
+        if _is_overloaded(obligations):
+            goals = len(obligations["goals"])
+            projects = len(obligations["projects"])
+            habits = len(obligations["habits"])
+            parts = []
+            if goals:
+                parts.append(f"{goals} active goal{'s' if goals != 1 else ''}")
+            if projects:
+                parts.append(f"{projects} project{'s' if projects != 1 else ''}")
+            if habits:
+                parts.append(f"{habits} habit{'s' if habits != 1 else ''}")
+            summary = ", ".join(parts)
+            conflicts.append({
+                "node_id": "__obligations__",
+                "title": "Active Obligations",
+                "type": "meta",
+                "conflict_type": "commitment_overload",
+                "severity": "soft",
+                "explanation": f"You already have {summary}. Where does this fit?",
+                "obligations": obligations,
+            })
 
     # Sort: hard first, then soft
     conflicts.sort(key=lambda c: (0 if c["severity"] == "hard" else 1))
@@ -301,3 +333,83 @@ def _is_overdue(due_str: str) -> bool:
         return due < date.today()
     except (ValueError, TypeError):
         return False
+
+
+# ── Tradeoff awareness: obligation surfacing ──
+
+
+def _has_new_commitment_signal(message_lower: str) -> bool:
+    """Check if message contains both an intention signal and a new commitment signal."""
+    has_action = any(s in message_lower for s in _ACTION_INTENTIONS)
+    has_spending_commitment = any(
+        s in message_lower for s in ("subscribe", "sign up", "enroll")
+    )
+    if not (has_action or has_spending_commitment):
+        return False
+    # Must also have a new commitment signal (not just any intention)
+    has_negation = any(s in message_lower for s in _NEGATION_SIGNALS)
+    if has_negation:
+        return False
+    return any(s in message_lower for s in _NEW_COMMITMENT_SIGNALS)
+
+
+def _gather_obligations(graph) -> dict:
+    """Count and list active obligations by type."""
+    obligations = {"goals": [], "projects": [], "habits": [], "events_upcoming": []}
+
+    for node in graph.get_nodes_by_type("goal"):
+        status = node.get("status", "active")
+        if status not in _RESOLVED_STATUSES:
+            obligations["goals"].append({
+                "id": node["id"],
+                "title": node.get("title", node["id"]),
+                "priority": node.get("priority", "medium"),
+            })
+
+    for node in graph.get_nodes_by_type("project"):
+        status = node.get("status", "active")
+        if status not in _RESOLVED_STATUSES:
+            obligations["projects"].append({
+                "id": node["id"],
+                "title": node.get("title", node["id"]),
+                "status": node.get("status", "active"),
+            })
+
+    for node in graph.get_nodes_by_type("habit"):
+        status = node.get("status", "active")
+        if status not in _RESOLVED_STATUSES:
+            obligations["habits"].append({
+                "id": node["id"],
+                "title": node.get("title", node["id"]),
+                "frequency": node.get("frequency", "weekly"),
+            })
+
+    today = date.today()
+    for node in graph.get_nodes_by_type("event"):
+        status = node.get("status", "active")
+        if status in _RESOLVED_STATUSES:
+            continue
+        event_date = node.get("date", "")
+        if event_date:
+            try:
+                dt = datetime.fromisoformat(str(event_date).split("T")[0]).date()
+                if today <= dt <= today + timedelta(days=30):
+                    obligations["events_upcoming"].append({
+                        "id": node["id"],
+                        "title": node.get("title", node["id"]),
+                        "date": str(event_date),
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    return obligations
+
+
+def _is_overloaded(obligations: dict) -> bool:
+    """Check if active obligations exceed the surfacing threshold."""
+    goals = len(obligations["goals"])
+    projects = len(obligations["projects"])
+    habits = len(obligations["habits"])
+    total = goals + projects + habits
+
+    return goals >= 3 or projects >= 2 or habits >= 5 or total >= 6

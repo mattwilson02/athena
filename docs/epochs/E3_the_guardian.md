@@ -76,11 +76,11 @@ This gives Claude the information to ask "where does this fit?" instead of blind
 
 **What success looks like:** "I want to start learning guitar" → Athena responds with "You've got 3 active goals and 4 habits already. What gives to make room for this?"
 
-### 4. Personality enforcement
-**Files:** `SOUL.md`, `backend/mentor_agent.py`
-**Spec:** `docs/specs/personality_enforcement.md`
+### 4. Conflict protocol
+**Files:** `SOUL.md`
+**Spec:** `docs/specs/conflict_protocol.md`
 
-SOUL.md gets a `## Conflict Protocol` section with explicit escalation rules. mentor_agent.py gets post-processing checks on Claude's output.
+SOUL.md gets a `## Conflict Protocol` section with explicit escalation rules — a defined procedure for what Athena does when conflicts are detected, rather than leaving it to Claude's discretion.
 
 **Conflict Protocol (injected into system prompt):**
 1. **Flag** — name the conflicting node(s) before responding to the user's request
@@ -88,12 +88,9 @@ SOUL.md gets a `## Conflict Protocol` section with explicit escalation rules. me
 3. **Challenge** — ask the user to reconcile, don't just accept
 4. **Accept** — if the user insists after being challenged, accept and record
 
-**Anti-cheerleading rules (post-processing):**
-- Detect filler phrases in Claude's output: "Great question!", "I'd be happy to", "That's a great idea!", "Absolutely!"
-- Strip them or flag for prompt reinforcement
-- Track cheerleading rate per session as a quality metric
+**What success looks like:** User says something that contradicts their values → Athena names the conflict, explains it, and pushes back before accepting.
 
-**What success looks like:** User says something that contradicts their values → Athena names the conflict, explains it, and pushes back before accepting. No filler phrases in the response.
+**Descoped: anti-cheerleading post-processing.** Originally this item included filler phrase detection, stripping, and quality metrics in `mentor_agent.py`. Cut because it's not a real problem — Athena's current responses don't cheerleade, and adding substring matching + sentence splitting + logging adds code weight for a non-issue. If it becomes a problem later, the SOUL.md prompt instructions are the first lever to pull, not post-processing.
 
 ### 5. `contradicts` edge type
 **Files:** `vault/_meta/schema.md`, `backend/mentor_agent.py`
@@ -122,6 +119,49 @@ This is a prerequisite for conflict detection — can't detect conflicts against
 
 **What success looks like:** Dismiss a node creation → next message, AI doesn't try to update or reference it.
 
+### 7. Temporal resolver: smarter date-based retrieval
+**Files:** `backend/mentor_agent.py`
+
+`_get_nodes_in_date_range()` has multiple blind spots that cause nodes to silently disappear from retrieval:
+
+**Problem A: Inactive status filter is too aggressive**
+The function filters out all nodes with inactive statuses (completed, done, archived, etc.) before checking dates. This means completed tasks from today are invisible to queries like "what happened today" or "what did I do". A completed task dated today is exactly what you'd want surfaced for a retrospective query.
+
+**Problem B: Overdue tasks fall outside forward-looking date ranges**
+When a task has a deadline in the past but is still active (pending/todo), forward-looking queries ("what do I need to do") use a date range starting from today — so the overdue task falls outside the range entirely. The task is incomplete and urgent, but invisible. Real example: ferry booking with deadline March 15, queried on March 16 — Athena can't see it even though it's the most urgent thing on the list.
+
+**Problem C (general): No "overdue" concept in retrieval**
+There's no sweep for active nodes whose deadline/due date has passed. These should be surfaced with high priority in forward-looking queries, not silently dropped because their date doesn't fall in the future range.
+
+**Problem D: `scheduled_for` field ignored in temporal retrieval**
+`_get_nodes_in_date_range()` only checks `("date", "due", "deadline")` but the schema defines `scheduled_for` (used by tasks like the ferry booking) and `renewal_date` (subscriptions). Nodes using these fields are invisible to all temporal queries.
+
+**Problem E: Common temporal phrases unsupported**
+`_resolve_temporal_query()` has no handlers for "last week", "last month", "next month", "coming up", or "last N days". These common queries silently return None and fall through to semantic search only.
+
+**Problem F: Day-name queries skip today**
+If today is Monday and user asks "what's on monday", `days_ahead == 0` is forced to 7 — resolving to next Monday, not today.
+
+**Problem G: Day names in node titles trigger false temporal matches**
+The substring check `if day_name in q` matches any occurrence. A query about "monday-motivation-habit" incorrectly triggers date range logic instead of semantic search.
+
+**Problem H: Temporal injection bypasses status penalties**
+Temporal nodes are injected with a fixed score of 0.3, bypassing `_STATUS_PENALTIES`. Semantic results get penalized for completed/cancelled status but temporal results don't — inconsistent scoring.
+
+The fix for A-D and H should ship in this epoch. E-G are separate improvements (see `docs/specs/temporal_resolver.md`).
+
+The fix needs to handle the core scenarios without introducing fragile query intent classification. Possible approaches:
+- Remove the status filter entirely and let `_STATUS_PENALTIES` in the scorer handle deprioritization
+- Add an overdue sweep: active nodes with `deadline < today` always surface for forward-looking queries
+- Treat overdue nodes as high-priority context injection (similar to conflict injection) rather than relying on date range matching
+
+Needs more thought on the right design — this is the kind of thing that's easy to over-engineer or under-engineer.
+
+**What success looks like:**
+- "What did I do today?" with a completed task dated today → task appears in context
+- "What do I need to do?" with an overdue task from yesterday → overdue task surfaces prominently
+- Overdue tasks are never silently invisible just because their date is in the past
+
 ---
 
 ## Out of Scope
@@ -132,6 +172,7 @@ This is a prerequisite for conflict detection — can't detect conflicts against
 - Commitment tracking / streaks — E5
 - State of mind inference — E6
 - Proactive messaging / notifications — E4+
+- Multi-agent orchestration — E5/E6. Split the single Claude call in mentor_agent.py into specialist agents (retrieval, conflict detection, synthesis) running in parallel. Gains: focused context windows, cheaper models for search/detection (haiku), lower latency from parallel execution. Trade-off: more complexity, harder debugging. Only worth it once the single-call approach hits quality or cost ceilings.
 
 ---
 
@@ -145,6 +186,7 @@ Ship incrementally:
 4. **Tradeoff awareness** — obligation surfacing, builds on conflict service
 5. **Personality enforcement** — SOUL.md update + post-processing, requires conflicts to enforce against
 6. **`contradicts` edge type** — schema + FORMAT_SPEC update, depends on conflict detection working
+7. **Temporal resolver fix** — remove status filter from date range lookup, let scorer handle it
 
 ---
 
@@ -159,6 +201,7 @@ Ship incrementally:
 7. `contradicts` edges proposed when genuine contradictions detected
 8. `detect_conflicts()` returns correct results for programmatic test cases
 9. All existing tests pass + new conflict, tradeoff, personality, dismissal tests
+10. "What did I do today?" with a completed task dated today → task appears in context
 
 ---
 

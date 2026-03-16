@@ -25,6 +25,33 @@ Create `backend/.env`:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### Docker (Production)
+
+```bash
+# 1. Create secrets
+mkdir -p deployment/secrets
+
+# API key for Claude
+echo "sk-ant-..." > deployment/secrets/anthropic_api_key.txt
+
+# Auth token: maps a bearer token to a user defined in deployment/config/config.yaml
+cat > deployment/secrets/auth_tokens.yaml << 'EOF'
+your-secret-token-here: web_ui
+EOF
+
+# Nginx proxy auth header (must match a token in auth_tokens.yaml)
+cat > deployment/secrets/proxy_auth.conf << 'EOF'
+proxy_set_header Authorization "Bearer your-secret-token-here";
+EOF
+
+# 2. Build and run
+docker compose up --build       # proxy on localhost:8080
+```
+
+Generate a secure token with: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+Three containers: nginx reverse proxy (`:8080`) → Svelte frontend + Flask backend on an internal Docker network.
+
 ## Tech Stack
 
 | Layer | Tech |
