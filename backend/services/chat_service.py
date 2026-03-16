@@ -78,6 +78,7 @@ class ChatService:
             "content": result["full_response"],
             "graph_updates": graph_updates,
             "relevant_nodes": result["relevant_nodes"],
+            "conflicts": conflicts,
         })
 
         return {
@@ -119,6 +120,7 @@ class ChatService:
                         "content": data["full_response"],
                         "graph_updates": graph_updates,
                         "relevant_nodes": data["relevant_nodes"],
+                        "conflicts": conflicts,
                     })
                     yield ("done", {
                         "response": data["response"],

@@ -230,9 +230,10 @@ class TestScheduleConflict:
         event_date = (date.today() + timedelta(days=30)).isoformat()
         dt = date.fromisoformat(event_date)
         month = dt.strftime("%B").lower()
+        day = str(dt.day)
 
         graph = FakeGraph([_make_node("trip", "event", "Italy Trip", date=event_date)])
-        conflicts = detect_conflicts(f"i'm going to book something in {month}", graph, None)
+        conflicts = detect_conflicts(f"i'm going to book something on {month} {day}", graph, None)
         assert len(conflicts) == 1
         assert conflicts[0]["conflict_type"] == "schedule_conflict"
 
@@ -240,10 +241,11 @@ class TestScheduleConflict:
         event_date = (date.today() + timedelta(days=14)).isoformat()
         dt = date.fromisoformat(event_date)
         month = dt.strftime("%B").lower()
+        day = str(dt.day)
 
         graph = FakeGraph([_make_node("dinner", "event", "Dinner with Jake",
                                       date=event_date, people=["jake"])])
-        conflicts = detect_conflicts(f"i want to cancel something in {month}", graph, None)
+        conflicts = detect_conflicts(f"i want to cancel something on {month} {day}", graph, None)
         assert len(conflicts) == 1
         assert conflicts[0]["conflict_type"] == "commitment_to_person"
         assert conflicts[0]["severity"] == "hard"

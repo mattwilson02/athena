@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -51,10 +52,13 @@ _AVOIDANCE_SIGNALS = [
 ]
 
 _NEW_COMMITMENT_SIGNALS = [
-    "start", "begin", "pick up", "take on", "add",
-    "learn", "try", "launch", "kick off",
+    "start a", "start the", "start learning", "start training",
+    "begin a", "begin the",
+    "pick up", "take on", "launch a", "kick off",
     "sign up", "enroll", "commit to",
     "new goal", "new project", "new habit",
+    "learn to", "learn a",
+    "something new",
 ]
 
 # Types eligible for conflict checking
@@ -100,7 +104,7 @@ def detect_conflicts(
                         if node:
                             candidates.append(node)
         except Exception:
-            pass  # vector search failure shouldn't block conflict detection
+            logger.warning("Vector search failed during conflict detection", exc_info=True)
 
     # Stage 4: Classify conflicts
     conflicts = []
@@ -210,7 +214,7 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
 
     # Topic matching — does the message reference this node's subject?
     topic_words = _extract_topic_words(title, node.get("content", ""))
-    topic_match = any(w in message_lower for w in topic_words if len(w) > 2)
+    topic_match = any(re.search(rf'\b{re.escape(w)}\b', message_lower) for w in topic_words if len(w) > 2)
 
     # Budget: any spending triggers them (no topic match needed)
     # Events/tasks/projects: check date overlap even without topic match
@@ -316,10 +320,10 @@ def _has_date_overlap(message_lower: str, event_node: dict) -> bool:
         dt = datetime.fromisoformat(str(event_date).split("T")[0])
         month_name = dt.strftime("%B").lower()
         day = str(dt.day)
-        # Check for "april 15", "april", or "15th"
+        # Require month + day ("april 15") or day ordinal ("15th") — month alone is too broad
         if f"{month_name} {day}" in message_lower:
             return True
-        if month_name in message_lower:
+        if f"{day}th" in message_lower or f"{day}st" in message_lower or f"{day}nd" in message_lower or f"{day}rd" in message_lower:
             return True
     except (ValueError, TypeError):
         pass

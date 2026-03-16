@@ -160,9 +160,13 @@
               <div class="conflict-chip" class:hard={conflict.severity === 'hard'} class:soft={conflict.severity === 'soft'}>
                 <span class="conflict-severity">{conflict.severity}</span>
                 <span class="conflict-type">{conflict.conflict_type.replace(/_/g, ' ')}</span>
-                <button class="conflict-node" onclick={() => onNodeSelect(conflict.node_id)}>
-                  {conflict.title}
-                </button>
+                {#if conflict.node_id && !conflict.node_id.startsWith('__')}
+                  <button class="conflict-node" onclick={() => onNodeSelect(conflict.node_id)}>
+                    {conflict.title}
+                  </button>
+                {:else}
+                  <span class="conflict-node">{conflict.title}</span>
+                {/if}
               </div>
             {/each}
           </div>

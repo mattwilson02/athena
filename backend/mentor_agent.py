@@ -646,7 +646,7 @@ def _get_nodes_in_date_range(graph, start: date, end: date) -> list[dict]:
 
 def _get_overdue_nodes(graph, today: date) -> list[dict]:
     """Find active nodes with due/deadline/scheduled_for in the past."""
-    _ACTIVE_STATUSES = {"active", "pending", "todo", "in_progress", "planning", "blocked", ""}
+    _ACTIVE_STATUSES = {"active", "pending", "todo", "in_progress", "planning", "blocked", "overdue", ""}
     overdue = []
     for node in graph.get_all_nodes():
         status = str(node.get("status", "") or "").lower()

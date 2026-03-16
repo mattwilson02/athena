@@ -509,3 +509,117 @@ class TestDismissedNote:
         assert "node-14" in note
         assert "node-0" not in note
         assert "node-4" not in note
+
+
+class TestBuildConflictNote:
+    """Test _build_conflict_note with regular, overload, and mixed conflicts."""
+
+    def test_empty_conflicts_returns_empty(self):
+        assert MentorAgent._build_conflict_note([]) == ""
+
+    def test_none_conflicts_returns_empty(self):
+        assert MentorAgent._build_conflict_note([]) == ""
+
+    def test_regular_conflict(self):
+        conflicts = [{
+            "node_id": "discipline-value",
+            "title": "Discipline",
+            "conflict_type": "value_violation",
+            "explanation": "Staying out late contradicts discipline",
+            "severity": "hard",
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "CONFLICT DETECTION" in note
+        assert "[HARD]" in note
+        assert "value_violation" in note
+        assert "Discipline" in note
+        assert "MUST acknowledge" in note
+
+    def test_soft_conflict(self):
+        conflicts = [{
+            "node_id": "marathon-goal",
+            "title": "Marathon Training",
+            "conflict_type": "goal_contradiction",
+            "explanation": "Skipping gym disrupts training",
+            "severity": "soft",
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "[SOFT]" in note
+        assert "Marathon Training" in note
+
+    def test_overload_conflict(self):
+        conflicts = [{
+            "node_id": "__obligations__",
+            "title": "Commitment overload",
+            "conflict_type": "commitment_overload",
+            "explanation": "Too many active commitments",
+            "severity": "soft",
+            "obligations": {
+                "goals": [{"title": "Goal A"}, {"title": "Goal B"}, {"title": "Goal C"}],
+                "projects": [{"title": "Project X"}],
+                "habits": [{"title": "Gym"}, {"title": "Reading"}],
+                "events_upcoming": [],
+            },
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "ACTIVE OBLIGATIONS" in note
+        assert "3 active goals" in note
+        assert "Goal A" in note
+        assert "1 active projects" in note
+        assert "2 active habits" in note
+        assert "deprioritize" in note
+        # Should NOT have CONFLICT DETECTION header (no regular conflicts)
+        assert "CONFLICT DETECTION" not in note
+
+    def test_mixed_regular_and_overload(self):
+        conflicts = [
+            {
+                "node_id": "discipline-value",
+                "title": "Discipline",
+                "conflict_type": "value_violation",
+                "explanation": "Contradicts discipline",
+                "severity": "hard",
+            },
+            {
+                "node_id": "__obligations__",
+                "title": "Commitment overload",
+                "conflict_type": "commitment_overload",
+                "explanation": "Too many commitments",
+                "severity": "soft",
+                "obligations": {
+                    "goals": [{"title": "Goal A"}, {"title": "Goal B"}, {"title": "Goal C"}],
+                    "projects": [],
+                    "habits": [],
+                    "events_upcoming": [],
+                },
+            },
+        ]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "CONFLICT DETECTION" in note
+        assert "ACTIVE OBLIGATIONS" in note
+        assert "[HARD]" in note
+        assert "Discipline" in note
+        assert "3 active goals" in note
+
+    def test_multiple_regular_conflicts(self):
+        conflicts = [
+            {
+                "node_id": "sleep-goal",
+                "title": "9pm-5am Sleep",
+                "conflict_type": "goal_contradiction",
+                "explanation": "Late night contradicts sleep goal",
+                "severity": "hard",
+            },
+            {
+                "node_id": "discipline-value",
+                "title": "Discipline",
+                "conflict_type": "value_violation",
+                "explanation": "Contradicts discipline value",
+                "severity": "soft",
+            },
+        ]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "9pm-5am Sleep" in note
+        assert "Discipline" in note
+        assert "[HARD]" in note
+        assert "[SOFT]" in note
