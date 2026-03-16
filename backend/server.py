@@ -73,7 +73,10 @@ def _load_auth_tokens() -> dict:
     if os.path.isfile(tokens_path):
         with open(tokens_path, "r") as f:
             data = yaml.safe_load(f) or {}
-        tokens = data.get("tokens", {})
+        # Support both flat (token: user) and nested (tokens: {token: user}) formats
+        tokens = data.get("tokens", data) if isinstance(data, dict) else {}
+        # Filter out non-string values (e.g. comments parsed as keys)
+        tokens = {k: v for k, v in tokens.items() if isinstance(v, str)}
         logger.info(f"Loaded {len(tokens)} auth token(s)")
         return tokens
     logger.info("No auth tokens file — auth disabled")

@@ -145,6 +145,18 @@ class ChatStore:
         self._write(session)
         return True
 
+    def undismiss_update(self, session_id: str, update_key: str) -> bool:
+        """Remove a node from the dismissed list (e.g. when confirmed via different path)."""
+        session = self._read(session_id)
+        if session is None:
+            return False
+        dismissed = session.get("dismissed_updates", [])
+        if update_key in dismissed:
+            dismissed.remove(update_key)
+            session["dismissed_updates"] = dismissed
+            self._write(session)
+        return True
+
     def get_messages_for_api(self, session_id: str) -> list[dict]:
         """Return messages formatted for the Claude API (role + content only)."""
         session = self._read(session_id)

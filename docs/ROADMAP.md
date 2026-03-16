@@ -277,4 +277,5 @@ Rethink the type system from scratch. Current 27 types grew organically with unc
 | Energy/rhythm prediction | 2 | Longitudinal pattern analysis |
 | Purpose discovery engine | 2 | Emergent + directed + dialectic |
 | Telegram restart | 2 | Needs container rebuild + security hardening |
+| Multi-agent orchestration | 2 | Split monolithic mentor_agent Claude call into specialist agents (retrieval, conflict detection, synthesis) running in parallel. Enables cheaper models for search (haiku), focused context windows, lower latency. Only worth it when single-call approach hits quality or cost ceilings. |
 | Multi-user | 4 | Family/household shared context |

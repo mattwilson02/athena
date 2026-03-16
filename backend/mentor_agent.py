@@ -623,17 +623,11 @@ def _resolve_temporal_query(query: str) -> tuple[date, date] | None:
     return None
 
 
-_INACTIVE_STATUSES = {"cancelled", "completed", "done", "archived", "abandoned", "superseded"}
-
-
 def _get_nodes_in_date_range(graph, start: date, end: date) -> list[dict]:
-    """Scan all nodes for matching date/due/deadline fields within range."""
+    """Scan all nodes for matching date/due/deadline/scheduled_for fields within range."""
     matches = []
     for node in graph.get_all_nodes():
-        status = str(node.get("status", "") or "").lower()
-        if status in _INACTIVE_STATUSES:
-            continue
-        for field in ("date", "due", "deadline"):
+        for field in ("date", "due", "deadline", "scheduled_for"):
             val = node.get(field)
             if not val:
                 continue
@@ -648,6 +642,31 @@ def _get_nodes_in_date_range(graph, start: date, end: date) -> list[dict]:
                 matches.append(node)
                 break
     return matches
+
+
+def _get_overdue_nodes(graph, today: date) -> list[dict]:
+    """Find active nodes with due/deadline/scheduled_for in the past."""
+    _ACTIVE_STATUSES = {"active", "pending", "todo", "in_progress", "planning", "blocked", "overdue", ""}
+    overdue = []
+    for node in graph.get_all_nodes():
+        status = str(node.get("status", "") or "").lower()
+        if status not in _ACTIVE_STATUSES:
+            continue
+        for field in ("due", "deadline", "scheduled_for"):
+            val = node.get(field)
+            if not val:
+                continue
+            try:
+                if isinstance(val, (date, datetime)):
+                    node_date = val if isinstance(val, date) else val.date()
+                else:
+                    node_date = datetime.fromisoformat(str(val).split("T")[0]).date()
+            except (ValueError, TypeError):
+                continue
+            if node_date < today:
+                overdue.append(node)
+                break
+    return overdue
 
 
 class MentorAgent:
@@ -685,6 +704,13 @@ class MentorAgent:
             temporal_nodes = _get_nodes_in_date_range(self.graph, date_range[0], date_range[1])
             temporal_node_ids = {n["id"] for n in temporal_nodes}
             logger.debug(f"Temporal resolution: {date_range[0]} to {date_range[1]}, {len(temporal_node_ids)} nodes")
+
+        # Overdue sweep — active nodes past their deadline always surface
+        today = date.today()
+        overdue_nodes = _get_overdue_nodes(self.graph, today)
+        temporal_node_ids |= {n["id"] for n in overdue_nodes}
+        if overdue_nodes:
+            logger.debug(f"Overdue nodes: {len(overdue_nodes)}")
 
         # Step 1: Classify query domains
         relevant_domains = _classify_domains(query)
@@ -755,7 +781,9 @@ class MentorAgent:
             if nid not in result_ids:
                 node = self.graph.get_node(nid)
                 if node:
-                    scored.append((0.3, {
+                    node_status = str(node.get("status", "") or "").lower()
+                    injection_score = 0.3 + _STATUS_PENALTIES.get(node_status, 0.0)
+                    scored.append((injection_score, {
                         "id": nid,
                         "title": node.get("title", nid),
                         "type": node.get("type", "unknown"),
@@ -799,7 +827,6 @@ class MentorAgent:
         chars_used = 0
 
         # Temporal facts header — pre-computed date facts at the TOP so Claude reads them first
-        today = date.today()
         temporal_header_parts = [f"TODAY: {today.strftime('%A, %d %B %Y')}"]
         if date_range:
             start, end = date_range
@@ -815,7 +842,7 @@ class MentorAgent:
             node = self.graph.get_node(nid)
             if not node:
                 continue
-            for field in ("date", "due", "deadline"):
+            for field in ("date", "due", "deadline", "scheduled_for"):
                 val = node.get(field)
                 if not val:
                     continue
@@ -902,7 +929,62 @@ class MentorAgent:
         )
         return context, top_results
 
-    def chat_stream(self, message: str, conversation_history: list[dict]):
+    def _build_dismissed_note(self, dismissed_ids: list[str]) -> str:
+        """Build a system prompt note about dismissed proposals."""
+        if not dismissed_ids:
+            return ""
+        recent = dismissed_ids[-10:]
+        ids = "\n".join(f"- {nid}" for nid in recent)
+        return (
+            f"\n\nDISMISSED PROPOSALS (user rejected these — do NOT reference or update them):\n"
+            f"{ids}\n"
+            f"These nodes do NOT exist. Do not propose updates to them unless the user explicitly asks again."
+        )
+
+    @staticmethod
+    def _build_conflict_note(conflicts: list[dict]) -> str:
+        """Build a system prompt note about detected conflicts."""
+        if not conflicts:
+            return ""
+        lines = []
+        # Separate obligation overload from regular conflicts
+        regular = [c for c in conflicts if c.get("node_id") != "__obligations__"]
+        overloads = [c for c in conflicts if c.get("node_id") == "__obligations__"]
+
+        for c in regular:
+            severity = c.get("severity", "soft").upper()
+            lines.append(f"- [{severity}] {c['conflict_type']}: {c.get('explanation', '')} (node: {c.get('title', c.get('node_id', '?'))})")
+        conflict_text = "\n".join(lines)
+        result = ""
+        if conflict_text:
+            result += (
+                f"\n\nCONFLICT DETECTION — the following conflicts were detected between the user's message and their existing graph:\n"
+                f"{conflict_text}\n"
+                f"You MUST acknowledge these conflicts in your response. For HARD conflicts, challenge the user directly. "
+                f"For SOFT conflicts, raise them as considerations. Do not ignore detected conflicts."
+            )
+        if overloads:
+            ob = overloads[0].get("obligations", {})
+            ob_lines = []
+            if ob.get("goals"):
+                ob_lines.append(f"- {len(ob['goals'])} active goals: {', '.join(g['title'] for g in ob['goals'])}")
+            if ob.get("projects"):
+                ob_lines.append(f"- {len(ob['projects'])} active projects: {', '.join(p['title'] for p in ob['projects'])}")
+            if ob.get("habits"):
+                ob_lines.append(f"- {len(ob['habits'])} active habits: {', '.join(h['title'] for h in ob['habits'])}")
+            if ob.get("events_upcoming"):
+                ob_lines.append(f"- {len(ob['events_upcoming'])} upcoming events: {', '.join(e['title'] for e in ob['events_upcoming'])}")
+            if ob_lines:
+                result += (
+                    f"\n\nACTIVE OBLIGATIONS (the user is proposing a new commitment — surface this):\n"
+                    + "\n".join(ob_lines)
+                    + "\nAsk what they're willing to deprioritize to make room."
+                )
+        return result
+
+    def chat_stream(self, message: str, conversation_history: list[dict],
+                    dismissed_ids: list[str] | None = None,
+                    conflicts: list[dict] | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -912,6 +994,8 @@ class MentorAgent:
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
+        system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_conflict_note(conflicts or [])
         messages = conversation_history + [{"role": "user", "content": message}]
 
         full_text = ""
@@ -983,14 +1067,20 @@ class MentorAgent:
             ],
         })
 
-    def chat(self, message: str, conversation_history: list[dict]) -> dict:
+    def chat(self, message: str, conversation_history: list[dict],
+             dismissed_ids: list[str] | None = None,
+             conflicts: list[dict] | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
+        dismissed_ids: node IDs the user dismissed this session — injected into prompt.
+        conflicts: detected conflicts between the message and existing graph nodes.
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
+        system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_conflict_note(conflicts or [])
 
         # Build messages: prior history + current user message
         messages = conversation_history + [{"role": "user", "content": message}]

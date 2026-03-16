@@ -6,6 +6,8 @@ import logging
 
 import anthropic
 
+from services.conflict_service import detect_conflicts
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,14 +21,27 @@ class ChatService:
         self.vector_index = vector_index
         self.vault_service = vault_service
 
+    def _detect_conflicts(self, message: str) -> list[dict]:
+        """Run conflict detection against the graph."""
+        try:
+            return detect_conflicts(message, self.graph, self.vector_index)
+        except Exception:
+            logger.exception("Conflict detection failed")
+            return []
+
     def send_message(self, session_id: str, message: str) -> dict:
-        """Process a user message. Returns {response, graph_updates, relevant_nodes} or {error}."""
+        """Process a user message. Returns {response, graph_updates, relevant_nodes, conflicts} or {error}."""
         if self.mentor is None:
             return {"error": "ANTHROPIC_API_KEY not configured", "status": 503}
 
         session = self.chat_store.get_session(session_id)
         if session is None:
             return {"error": "Session not found", "status": 404}
+
+        dismissed_ids = session.get("dismissed_updates", [])
+
+        # Detect conflicts before calling the mentor
+        conflicts = self._detect_conflicts(message)
 
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
@@ -36,7 +51,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -63,12 +78,14 @@ class ChatService:
             "content": result["full_response"],
             "graph_updates": graph_updates,
             "relevant_nodes": result["relevant_nodes"],
+            "conflicts": conflicts,
         })
 
         return {
             "response": result["response"],
             "graph_updates": graph_updates,
             "relevant_nodes": result["relevant_nodes"],
+            "conflicts": conflicts,
         }
 
     def stream_message(self, session_id: str, message: str):
@@ -82,12 +99,17 @@ class ChatService:
             yield ("error", {"error": "Session not found"})
             return
 
+        dismissed_ids = session.get("dismissed_updates", [])
+
+        # Detect conflicts before calling the mentor
+        conflicts = self._detect_conflicts(message)
+
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":
@@ -98,11 +120,13 @@ class ChatService:
                         "content": data["full_response"],
                         "graph_updates": graph_updates,
                         "relevant_nodes": data["relevant_nodes"],
+                        "conflicts": conflicts,
                     })
                     yield ("done", {
                         "response": data["response"],
                         "graph_updates": graph_updates,
                         "relevant_nodes": data["relevant_nodes"],
+                        "conflicts": conflicts,
                     })
         except anthropic.AuthenticationError:
             yield ("error", {"error": "Invalid API key. Check your ANTHROPIC_API_KEY."})
@@ -206,6 +230,11 @@ class ChatService:
 
         if result.get("error"):
             return {"response": f"Failed to {action} \"{title}\": {result['error']}"}
+
+        # If this node was previously dismissed, remove it from dismissed list
+        node_id = update.get("node_id", "")
+        if node_id:
+            self.chat_store.undismiss_update(session_id, node_id)
 
         # Queue cascade proposals as additional pending updates
         cascade = result.get("cascade_proposals", [])
