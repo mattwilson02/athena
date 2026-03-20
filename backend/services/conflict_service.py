@@ -46,10 +46,29 @@ _SPENDING_SIGNALS = [
     "splurge", "purchase", "treat myself",
 ]
 
+_ADMISSION_SIGNALS = [
+    "haven't", "havent", "have not",
+    "been slack", "been slacking",
+    "fell off", "fallen off",
+    "missed my", "missed the",
+    "not been", "haven't been", "havent been",
+    "stopped going", "stopped doing",
+    "skipped my", "skipped the",
+    "neglected", "let slide",
+]
+
 _AVOIDANCE_SIGNALS = [
     "avoid", "skip", "not going to", "can't face", "cant face",
     "too scared", "not ready", "put off", "postpone", "dodge",
 ]
+
+_MONETARY_INDICATORS = [
+    "$", "£", "€", "cost", "price", "dollars", "pounds", "quid",
+]
+
+_TIME_SPENDING_PATTERN = re.compile(
+    r'spend(?:ing)?\s+\d*\s*(?:hours?|days?|time|minutes?|weeks?|months?)'
+)
 
 _NEW_COMMITMENT_SIGNALS = [
     "start a", "start the", "start learning", "start training",
@@ -163,11 +182,17 @@ def _detect_signals(message_lower: str) -> dict:
     has_negation = any(s in message_lower for s in _NEGATION_SIGNALS)
     has_change = any(s in message_lower for s in _CHANGE_SIGNALS)
     has_spending = any(s in message_lower for s in _SPENDING_SIGNALS)
+    has_admission = any(s in message_lower for s in _ADMISSION_SIGNALS)
+
+    # "spending 12 hours" is time-spending, not money-spending
+    if has_spending and _TIME_SPENDING_PATTERN.search(message_lower):
+        has_spending = False
 
     return {
-        "has_intention": has_action or has_negation or has_change or has_spending,
+        "has_intention": has_action or has_negation or has_change or has_spending or has_admission,
         "has_negation": has_negation,
         "has_spending": has_spending,
+        "has_admission": has_admission,
     }
 
 
@@ -211,6 +236,7 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
     title = node.get("title", "")
     has_negation = signals["has_negation"]
     has_spending = signals["has_spending"]
+    has_admission = signals.get("has_admission", False)
 
     # Topic matching — does the message reference this node's subject?
     topic_words = _extract_topic_words(title, node.get("content", ""))
@@ -258,6 +284,13 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
             "explanation": f"This breaks your active habit: {title} ({frequency})",
         }
 
+    if node_type == "habit" and has_admission and topic_match:
+        return {
+            "conflict_type": "habit_break",
+            "severity": "soft",
+            "explanation": f"You mentioned falling behind on your habit: {title}",
+        }
+
     if node_type == "belief" and has_negation and topic_match:
         return {
             "conflict_type": "belief_contradiction",
@@ -297,11 +330,13 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
     # ── Financial conflicts ──
 
     if node_type == "budget" and has_spending:
-        return {
-            "conflict_type": "budget_breach",
-            "severity": "soft",
-            "explanation": f"Check this against your {title} budget",
-        }
+        has_monetary = any(m in message_lower for m in _MONETARY_INDICATORS)
+        if topic_match or has_monetary:
+            return {
+                "conflict_type": "budget_breach",
+                "severity": "soft",
+                "explanation": f"Check this against your {title} budget",
+            }
 
     return None
 

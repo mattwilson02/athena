@@ -343,3 +343,48 @@ def _is_overdue(due_str: str) -> bool:
 10. Completed/achieved/cancelled nodes don't generate conflicts
 11. Max 5 conflicts returned per message, `hard` sorted first
 12. All tests pass
+
+---
+
+## Addendum: Post-Merge QA Findings
+
+QA testing after initial merge revealed four signal-matching issues that produce false positives or missed detections. Fixes target Stage 1 (signal detection) and Stage 4 (classification) only — no changes to the pipeline structure, API, or conflict type definitions.
+
+### QA-1: "spend" matches time, not just money
+
+**Problem:** `_SPENDING_SIGNALS` contains "spend" and "spending", which match non-financial usage. "I've been spending 12+ hours on this project" triggers `budget_breach` on every budget node. Any message about spending *time* is misclassified as a financial intention.
+
+**Fix:** In Stage 1, when "spend" or "spending" is detected, check the following word(s) against a time-word list (`hours`, `days`, `time`, `minutes`, `weeks`, `months`). If a time word follows, suppress the spending signal. Only set `has_spending = True` when the context is financial.
+
+### QA-2: Admission signals missing from signal detection
+
+**Problem:** Stage 1 negation signals cover intentional quitting ("skip", "quit", "stop", "give up") but not admissions of neglect. Messages like "I haven't lifted in a week", "been slack on my steps", or "I fell off my routine" contain no negation signals and exit early with no conflicts detected.
+
+**Fix:** Add a new signal category `_ADMISSION_SIGNALS`: `"haven't"`, `"havent"`, `"been slack"`, `"fell off"`, `"missed my"`, `"not been"`, `"stopped going"`, `"skipped"`. Detected separately from negation — sets `has_admission = True` alongside the existing `has_negation` flag. Both flags are passed to Stage 4.
+
+### QA-3: No classifier path for admission + habit
+
+**Problem:** `_classify_conflict` checks `has_negation` for identity conflicts (value, goal, habit, belief). Even with admission signals detected (QA-2), the habit branch requires `has_negation AND topic_match` — admissions never reach the habit classifier.
+
+**Fix:** Add a parallel branch in `_classify_conflict`:
+
+```python
+if node_type == "habit" and has_admission and topic_match:
+    return {
+        "conflict_type": "habit_break",
+        "severity": "soft",  # always soft — admission is softer than explicit negation
+        "explanation": f"You may be falling behind on your habit: {title}",
+    }
+```
+
+Admissions produce `soft` severity regardless of habit frequency, because admitting neglect is less definitive than stating intent to quit.
+
+### QA-4: Budget trigger fires without topic or monetary context
+
+**Problem:** In Stage 4, the topic match gate explicitly exempts budget nodes (`if not topic_match and node_type not in ("budget",)`). Combined with QA-1, this means any spending signal — including false ones — fires every budget node as a conflict. Even without QA-1, a message like "I want to buy running shoes" fires against an unrelated entertainment budget.
+
+**Fix:** Remove the budget exemption from the topic match gate. Budget conflicts now require *either*:
+- `topic_match` — message references this budget's category, OR
+- A monetary indicator in the message — dollar signs (`$`), currency words (`cost`, `price`, `dollars`, `pounds`), or numeric amounts adjacent to spending verbs
+
+This prevents indiscriminate budget firing while still catching general spending statements that include monetary context.

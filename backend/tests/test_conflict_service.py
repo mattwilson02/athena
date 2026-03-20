@@ -76,6 +76,19 @@ class TestDetectSignals:
         s = _detect_signals("actually i changed my mind about the trip")
         assert s["has_intention"] is True
 
+    def test_time_spending_not_spending(self):
+        s = _detect_signals("i've been spending 12 hours on this project")
+        assert s["has_spending"] is False
+
+    def test_buy_still_triggers_spending(self):
+        s = _detect_signals("i want to buy a new laptop")
+        assert s["has_spending"] is True
+
+    def test_admission_signal(self):
+        s = _detect_signals("haven't lifted in a week")
+        assert s["has_admission"] is True
+        assert s["has_intention"] is True
+
 
 # ── Topic word extraction ──
 
@@ -179,6 +192,21 @@ class TestHabitBreak:
         graph = FakeGraph([_make_node("reading", "habit", "Reading", frequency="weekly")])
         conflicts = detect_conflicts("i want to skip reading this week", graph, None)
         assert len(conflicts) == 1
+        assert conflicts[0]["severity"] == "soft"
+
+    def test_admission_triggers_soft_habit_break(self):
+        graph = FakeGraph([_make_node("lifting", "habit", "Lifting Weights", frequency="daily")])
+        conflicts = detect_conflicts("haven't done any lifting in a week", graph, None)
+        assert len(conflicts) == 1
+        assert conflicts[0]["conflict_type"] == "habit_break"
+        assert conflicts[0]["severity"] == "soft"
+        assert "falling behind" in conflicts[0]["explanation"]
+
+    def test_admission_slack_triggers_habit_break(self):
+        graph = FakeGraph([_make_node("steps", "habit", "Daily Steps", frequency="daily")])
+        conflicts = detect_conflicts("been slack on my steps", graph, None)
+        assert len(conflicts) == 1
+        assert conflicts[0]["conflict_type"] == "habit_break"
         assert conflicts[0]["severity"] == "soft"
 
     def test_lapsed_habit_skipped(self):
@@ -294,9 +322,22 @@ class TestFinancialConflicts:
     def test_budget_breach(self):
         graph = FakeGraph([_make_node("monthly-budget", "budget", "Monthly Budget",
                                       amount=2000, currency="GBP")])
-        conflicts = detect_conflicts("i want to buy some new clothes", graph, None)
+        conflicts = detect_conflicts("i want to buy some new clothes for £80", graph, None)
         assert len(conflicts) == 1
         assert conflicts[0]["conflict_type"] == "budget_breach"
+
+    def test_spending_without_monetary_context_no_budget(self):
+        graph = FakeGraph([_make_node("monthly-budget", "budget", "Monthly Budget",
+                                      amount=2000, currency="GBP")])
+        conflicts = detect_conflicts("i want to order some food", graph, None)
+        budget_conflicts = [c for c in conflicts if c["conflict_type"] == "budget_breach"]
+        assert len(budget_conflicts) == 0
+
+    def test_spending_with_monetary_indicator_triggers_budget(self):
+        graph = FakeGraph([_make_node("monthly-budget", "budget", "Monthly Budget",
+                                      amount=2000, currency="GBP")])
+        conflicts = detect_conflicts("i want to buy something for £50", graph, None)
+        assert any(c["conflict_type"] == "budget_breach" for c in conflicts)
 
     def test_no_spending_no_budget_conflict(self):
         graph = FakeGraph([_make_node("monthly-budget", "budget", "Monthly Budget")])

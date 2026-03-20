@@ -211,3 +211,33 @@ Ship incrementally:
 - **Quality depends on graph completeness** — can't detect conflicts with goals that don't exist in the graph. Mitigation: E2 bootstrap ensures core values/goals exist. Conflict detection degrades gracefully (fewer conflicts, not wrong conflicts).
 - **Anti-cheerleading is blunt** — string matching for filler phrases may catch legitimate usage. Mitigation: check in context (don't strip "great" from "that's a great risk to flag"). Start with logging, not stripping.
 - **Contradiction edges may clutter the graph** — too many soft contradictions create noise. Mitigation: only propose `contradicts` for hard conflicts. Soft tensions are conversational, not structural.
+
+---
+
+## Post-Merge QA Refinements
+
+QA testing after merge revealed four issues in the conflict detection pipeline — all related to signal matching precision in `conflict_service.py`. None affect the architecture or API surface; these are classification logic fixes.
+
+### Issue 1: False positive spending trigger
+
+`_SPENDING_SIGNALS` includes "spend" and "spending", which matches non-financial usage like "spending 12+ hours on this". Any message about spending *time* causes every budget node to fire as a conflict. The word "spend" is ambiguous without context.
+
+**Fix:** Time-spending disambiguation. Filter out "spend"/"spending" when followed by time-related words (hours, days, time, minutes, etc.). Only treat as a spending signal when the context is financial.
+
+### Issue 2: Missing admission signals
+
+Messages like "I haven't lifted in a week" or "been slack on my steps" are confessions of habit neglect, but the negation signal list (`_NEGATION_SIGNALS`) only covers intentional quitting: "skip", "quit", "stop", "give up". There's no pattern for *admitting you've fallen off* a habit without explicitly saying you're quitting it.
+
+**Fix:** New signal category for admissions: "haven't", "havent", "been slack", "fell off", "missed my", "not been", "stopped going", "skipped". These are distinct from negation signals — they indicate past neglect rather than future intent.
+
+### Issue 3: No habit-neglect classifier path
+
+Even with admission signals added, `_classify_conflict` for habits requires `has_negation AND topic_match`. Admissions don't set `has_negation` — they're a different signal type. There's no code path where admission + topic match produces a conflict.
+
+**Fix:** Add an admission + topic match path in `_classify_conflict` that returns `habit_break` with `soft` severity. Admissions are softer than explicit negation ("I haven't been going" vs "I'm quitting the gym") so they always produce soft conflicts regardless of habit frequency.
+
+### Issue 4: Budget trigger too loose
+
+Budget conflicts fire on any spending signal with no topic match required — the classifier skips the topic match gate for budget nodes (line: `if not topic_match and node_type not in ("budget",)`). This means *any* spending signal triggers *every* budget node, regardless of whether the message relates to that budget's category.
+
+**Fix:** Tighten the budget trigger to require either a topic match OR a monetary indicator (dollar signs, currency words, specific amounts) alongside the spending signal. A message about "buying running shoes" should check against a fitness or general budget, not fire indiscriminately against all budgets.
