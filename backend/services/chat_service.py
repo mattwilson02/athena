@@ -6,6 +6,7 @@ import logging
 
 import anthropic
 
+from mentor_agent import classify_mode
 from services.conflict_service import detect_conflicts
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,13 @@ class ChatService:
         # Detect conflicts before calling the mentor
         conflicts = self._detect_conflicts(message)
 
+        # Classify mode based on message content and detected conflicts
+        try:
+            mode = classify_mode(message, conflicts)
+        except Exception:
+            logger.exception("Mode classification failed — defaulting to mirror")
+            mode = "mirror"
+
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
 
@@ -51,7 +59,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -104,12 +112,19 @@ class ChatService:
         # Detect conflicts before calling the mentor
         conflicts = self._detect_conflicts(message)
 
+        # Classify mode based on message content and detected conflicts
+        try:
+            mode = classify_mode(message, conflicts)
+        except Exception:
+            logger.exception("Mode classification failed — defaulting to mirror")
+            mode = "mirror"
+
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":

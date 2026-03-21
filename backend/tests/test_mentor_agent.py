@@ -20,6 +20,7 @@ from mentor_agent import (
     _bootstrap_context,
     _BOOTSTRAP_THRESHOLD,
     _STATUS_PENALTIES,
+    build_system_prompt,
     MentorAgent,
 )
 
@@ -530,7 +531,7 @@ class TestBuildConflictNote:
         }]
         note = MentorAgent._build_conflict_note(conflicts)
         assert "CONFLICT DETECTION" in note
-        assert "[HARD]" in note
+        assert "[HARD |" in note
         assert "value_violation" in note
         assert "Discipline" in note
         assert "MUST acknowledge" in note
@@ -544,7 +545,7 @@ class TestBuildConflictNote:
             "severity": "soft",
         }]
         note = MentorAgent._build_conflict_note(conflicts)
-        assert "[SOFT]" in note
+        assert "[SOFT |" in note
         assert "Marathon Training" in note
 
     def test_overload_conflict(self):
@@ -597,7 +598,7 @@ class TestBuildConflictNote:
         note = MentorAgent._build_conflict_note(conflicts)
         assert "CONFLICT DETECTION" in note
         assert "ACTIVE OBLIGATIONS" in note
-        assert "[HARD]" in note
+        assert "[HARD |" in note
         assert "Discipline" in note
         assert "3 active goals" in note
 
@@ -621,5 +622,152 @@ class TestBuildConflictNote:
         note = MentorAgent._build_conflict_note(conflicts)
         assert "9pm-5am Sleep" in note
         assert "Discipline" in note
-        assert "[HARD]" in note
-        assert "[SOFT]" in note
+        assert "[HARD |" in note
+        assert "[SOFT |" in note
+
+
+# ── Soul modes parsing ──
+
+
+_MINIMAL_SCHEMA = {
+    "type_list": ["goal", "value", "task", "note"],
+    "types": {
+        "goal": {"domain": "Self", "description": "A goal"},
+        "value": {"domain": "Self", "description": "A value"},
+        "task": {"domain": "Planning", "description": "A task"},
+        "note": {"domain": "Knowledge", "description": "A note"},
+    },
+    "domain_list": ["Self", "Planning", "Knowledge"],
+    "domains": {
+        "Self": {"folder": "Self", "description": "Inner world", "types": ["goal", "value"]},
+        "Planning": {"folder": "Planning", "description": "Tasks and plans", "types": ["task"]},
+        "Knowledge": {"folder": "Knowledge", "description": "Notes and ideas", "types": ["note"]},
+    },
+}
+
+
+class TestSoulModesParsed:
+    """Test that _load_soul() and build_system_prompt() parse mode sections correctly."""
+
+    def test_soul_modes_parsed(self):
+        """All four mode keys are present in parsed mode_instructions."""
+        _, mode_instructions = build_system_prompt(_MINIMAL_SCHEMA)
+        assert "mirror" in mode_instructions
+        assert "advisor" in mode_instructions
+        assert "guardian" in mode_instructions
+        assert "dialectic" in mode_instructions
+
+    def test_mode_instructions_not_empty(self):
+        """Each mode has non-empty instruction text."""
+        _, mode_instructions = build_system_prompt(_MINIMAL_SCHEMA)
+        for mode in ("mirror", "advisor", "guardian", "dialectic"):
+            assert mode_instructions[mode].strip(), f"Mode '{mode}' has empty instructions"
+
+
+class TestSystemPromptIncludesMode:
+    """Test that _build_mode_note() injects mode instructions into system prompt."""
+
+    def _make_agent(self):
+        from unittest.mock import MagicMock
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.schema = _MINIMAL_SCHEMA
+        agent.client = MagicMock()
+        agent.system_prompt_template, agent.mode_instructions = build_system_prompt(_MINIMAL_SCHEMA)
+        agent.model = "test-model"
+        return agent
+
+    def test_system_prompt_includes_active_mode(self):
+        agent = self._make_agent()
+        note = agent._build_mode_note("advisor")
+        assert "ACTIVE MODE: advisor" in note
+
+    def test_system_prompt_mirror_default(self):
+        agent = self._make_agent()
+        note = agent._build_mode_note("mirror")
+        assert "ACTIVE MODE: mirror" in note
+        assert agent.mode_instructions["mirror"] in note
+
+    def test_mode_guardian_includes_instructions(self):
+        agent = self._make_agent()
+        note = agent._build_mode_note("guardian")
+        assert "ACTIVE MODE: guardian" in note
+        assert "Conflict Protocol" in note or len(note) > len("ACTIVE MODE: guardian")
+
+    def test_mode_dialectic_includes_instructions(self):
+        agent = self._make_agent()
+        note = agent._build_mode_note("dialectic")
+        assert "ACTIVE MODE: dialectic" in note
+
+    def test_no_mode_backward_compat(self):
+        """When mode is empty string, no ACTIVE MODE section in system prompt."""
+        agent = self._make_agent()
+        note = agent._build_mode_note("")
+        assert "ACTIVE MODE" not in note
+
+    def test_none_like_mode_no_injection(self):
+        """_build_mode_note with falsy mode returns empty string."""
+        agent = self._make_agent()
+        assert agent._build_mode_note("") == ""
+
+
+# ── Conflict note includes permanence ──
+
+
+class TestConflictNoteShowsPermanence:
+    """Test that _build_conflict_note includes permanence labels."""
+
+    def test_conflict_note_shows_identity_permanence(self):
+        conflicts = [{
+            "node_id": "discipline-value",
+            "title": "Discipline",
+            "type": "value",
+            "permanence": "identity",
+            "conflict_type": "value_violation",
+            "explanation": "Contradicts discipline",
+            "severity": "hard",
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "identity" in note
+        assert "[HARD | identity]" in note
+
+    def test_conflict_note_shows_tactical_permanence(self):
+        conflicts = [{
+            "node_id": "buy-groceries",
+            "title": "Buy Groceries",
+            "type": "task",
+            "permanence": "tactical",
+            "conflict_type": "priority_inversion",
+            "explanation": "High-priority task being skipped",
+            "severity": "soft",
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "[SOFT | tactical]" in note
+
+    def test_conflict_note_shows_strategic_permanence(self):
+        conflicts = [{
+            "node_id": "marathon-goal",
+            "title": "Marathon Training",
+            "type": "goal",
+            "permanence": "strategic",
+            "conflict_type": "goal_contradiction",
+            "explanation": "Skipping training session",
+            "severity": "soft",
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        assert "[SOFT | strategic]" in note
+
+    def test_conflict_without_permanence_uses_default(self):
+        """Conflicts without permanence field still produce valid output."""
+        conflicts = [{
+            "node_id": "some-node",
+            "title": "Some Node",
+            "type": "unknown",
+            "conflict_type": "value_violation",
+            "explanation": "Some explanation",
+            "severity": "soft",
+        }]
+        note = MentorAgent._build_conflict_note(conflicts)
+        # Should have the format with pipe separator, defaulting to "tactical"
+        assert "[SOFT | tactical]" in note
