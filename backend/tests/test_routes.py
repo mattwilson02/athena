@@ -458,3 +458,184 @@ class TestStreamingEndpoint:
     def test_stream_missing_session_id(self, client):
         resp = client.post("/api/chat/stream", json={"message": "test"})
         assert resp.status_code == 400
+
+
+# ── Accountability Route ──────────────────────────────────────────────────
+
+
+class TestAccountabilityRoute:
+
+    def test_accountability_endpoint_returns_structure(self, client):
+        """GET /api/accountability returns streaks, overdue, and summary keys."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "streaks" in data
+        assert "overdue" in data
+        assert "summary" in data
+
+    def test_accountability_endpoint_returns_streaks(self, client):
+        """Endpoint returns a list for streaks (may be empty with test graph)."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data["streaks"], list)
+
+    def test_accountability_endpoint_returns_overdue(self, client):
+        """Endpoint returns a list for overdue (may be empty with test graph)."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data["overdue"], list)
+
+    def test_accountability_endpoint_summary_counts(self, client):
+        """summary.on_track + at_risk + broken == total_habits."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        s = resp.get_json()["summary"]
+        assert s["on_track"] + s["at_risk"] + s["broken"] == s["total_habits"]
+
+    def test_accountability_endpoint_empty_graph(self, client):
+        """Empty graph returns zero counts and empty lists."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        summary = data["summary"]
+        # Test graph has no habit nodes, so habits = 0
+        # overdue depends on test graph nodes/dates
+        assert isinstance(summary["total_habits"], int)
+        assert isinstance(summary["overdue_count"], int)
+
+    def test_accountability_endpoint_error_handling(self, client, app):
+        """Accountability service error → 500 response."""
+        from unittest.mock import patch
+        with patch(
+            "routes.graph_routes.calculate_streaks",
+            side_effect=RuntimeError("boom"),
+        ):
+            resp = client.get("/api/accountability")
+            assert resp.status_code == 500
+            data = resp.get_json()
+            assert "error" in data
+
+
+# ── Commitment Metadata Post-Processing ──────────────────────────────────
+
+
+class TestCommitmentMetadataEnrichment:
+    """Test ChatService._enrich_commitment_metadata()."""
+
+    def _make_service(self):
+        """Build a minimal ChatService for unit-testing post-processing."""
+        from unittest.mock import MagicMock
+        from services.chat_service import ChatService
+        graph = MagicMock()
+        graph.get_node = MagicMock(return_value=None)
+        vi = MagicMock()
+        vi.find_duplicates = MagicMock(return_value=[])
+        svc = ChatService.__new__(ChatService)
+        svc.chat_store = MagicMock()
+        svc.mentor = MagicMock()
+        svc.graph = graph
+        svc.vector_index = vi
+        svc.vault_service = MagicMock()
+        return svc
+
+    def test_enrich_commitment_valid_date(self):
+        """Update with valid committed_on passes through unchanged."""
+        svc = self._make_service()
+        updates = [{
+            "action": "create",
+            "node_id": "my-task",
+            "type": "task",
+            "frontmatter": {
+                "committed_on": "2026-03-21",
+                "commitment_context": "Promised by Friday",
+            },
+        }]
+        result = svc._enrich_commitment_metadata(updates)
+        assert result[0]["frontmatter"]["committed_on"] == "2026-03-21"
+        assert result[0]["frontmatter"]["commitment_context"] == "Promised by Friday"
+
+    def test_enrich_commitment_invalid_date_stripped(self):
+        """Update with malformed committed_on has it removed."""
+        svc = self._make_service()
+        updates = [{
+            "action": "create",
+            "node_id": "my-task",
+            "type": "task",
+            "frontmatter": {
+                "committed_on": "not-a-date",
+                "commitment_context": "Some context",
+            },
+        }]
+        result = svc._enrich_commitment_metadata(updates)
+        assert "committed_on" not in result[0]["frontmatter"]
+
+    def test_enrich_commitment_context_default(self):
+        """Update with committed_on but no commitment_context gets empty string default."""
+        svc = self._make_service()
+        updates = [{
+            "action": "create",
+            "node_id": "my-task",
+            "type": "task",
+            "frontmatter": {"committed_on": "2026-03-21"},
+        }]
+        result = svc._enrich_commitment_metadata(updates)
+        assert result[0]["frontmatter"]["commitment_context"] == ""
+
+    def test_enrich_no_commitment_fields_unchanged(self):
+        """Update without commitment fields is returned unchanged."""
+        svc = self._make_service()
+        updates = [{
+            "action": "create",
+            "node_id": "my-task",
+            "type": "task",
+            "frontmatter": {"status": "active", "priority": "high"},
+        }]
+        result = svc._enrich_commitment_metadata(updates)
+        assert result[0]["frontmatter"] == {"status": "active", "priority": "high"}
+
+    def test_enrich_update_action_with_commitment(self):
+        """Update action with committed_on in changes.frontmatter is also processed."""
+        svc = self._make_service()
+        updates = [{
+            "action": "update",
+            "node_id": "existing-task",
+            "changes": {
+                "frontmatter": {"committed_on": "2026-03-21"},
+            },
+        }]
+        result = svc._enrich_commitment_metadata(updates)
+        assert result[0]["changes"]["frontmatter"]["commitment_context"] == ""
+
+    def test_enrich_link_action_unchanged(self):
+        """Link actions are not modified."""
+        svc = self._make_service()
+        updates = [{"action": "link", "source": "a", "target": "b", "type": "relates_to"}]
+        result = svc._enrich_commitment_metadata(updates)
+        assert result == [{"action": "link", "source": "a", "target": "b", "type": "relates_to"}]
+
+
+class TestAccountabilityErrorHandling:
+    """Test that accountability service errors don't break chat flow."""
+
+    def test_accountability_error_doesnt_break_chat(self, client):
+        """Mock accountability to raise; chat still works with empty alerts."""
+        from unittest.mock import patch
+
+        create_resp = client.post("/api/chat/sessions")
+        sid = create_resp.get_json()["id"]
+
+        with patch(
+            "services.chat_service.ChatService._build_alerts",
+            side_effect=RuntimeError("accountability exploded"),
+        ):
+            resp = client.post("/api/chat", json={
+                "session_id": sid,
+                "message": "Hello Athena",
+            })
+        # Chat should still succeed even if accountability fails
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "response" in data

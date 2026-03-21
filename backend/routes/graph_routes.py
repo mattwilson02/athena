@@ -6,9 +6,12 @@ import json
 import logging
 import os
 import re
+from datetime import date as _date
 
 import anthropic
 from flask import Blueprint, current_app, jsonify, request
+
+from services.accountability_service import calculate_streaks, find_overdue_commitments
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +137,36 @@ def activity():
 
     activities.sort(key=lambda a: a["timestamp"], reverse=True)
     return jsonify({"activities": activities[:limit]})
+
+
+@graph_bp.route("/api/accountability", methods=["GET"])
+def get_accountability():
+    """Return current accountability state: streaks, overdue commitments, summary."""
+    g = current_app.config["graph"]
+    try:
+        streaks = calculate_streaks(g)
+        overdue = find_overdue_commitments(g, _date.today())
+    except Exception:
+        logger.exception("Accountability service error")
+        return jsonify({"error": "Failed to compute accountability state"}), 500
+
+    on_track = sum(1 for s in streaks if s["streak_status"] == "on_track")
+    at_risk = sum(1 for s in streaks if s["streak_status"] == "at_risk")
+    broken = sum(1 for s in streaks if s["streak_status"] == "broken")
+    oldest_overdue = max((o["days_overdue"] for o in overdue), default=0)
+
+    return jsonify({
+        "streaks": streaks,
+        "overdue": overdue,
+        "summary": {
+            "total_habits": len(streaks),
+            "on_track": on_track,
+            "at_risk": at_risk,
+            "broken": broken,
+            "overdue_count": len(overdue),
+            "oldest_overdue_days": oldest_overdue,
+        },
+    })
 
 
 @graph_bp.route("/api/graph/suggest-links", methods=["POST"])

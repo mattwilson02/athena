@@ -170,3 +170,9 @@ export function getSchema() {
 export function getInsights() {
   return fetchJSON(`${BASE}/insights`);
 }
+
+// --- Accountability ---
+
+export function getAccountability() {
+  return fetchJSON(`${BASE}/accountability`);
+}

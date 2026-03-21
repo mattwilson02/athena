@@ -436,7 +436,23 @@ Wrap graph updates in <graph_updates> tags after your response text:
     "type": "edge_type"
   }}
 ]
-</graph_updates>"""
+</graph_updates>
+
+── 8. COMMITMENTS ──
+When the user makes an explicit promise ("I'll do X by Friday", "I commit to X", "I promise to Y", \
+"I'll have it done by Z"), tag the graph update with commitment metadata:
+
+  "frontmatter": {{
+    "committed_on": "YYYY-MM-DD",        // today's date (use the date from CONTEXT header)
+    "commitment_context": "Promised Sarah I'd review by Tuesday"  // brief context of the promise
+  }}
+
+Only tag explicit promises with clear deadlines. "I should probably do X sometime" is NOT a commitment. \
+"I want to start running" is NOT a commitment. "I'll run 3 times this week" IS a commitment.
+
+If the node already exists, use action: "update" with frontmatter changes to add committed_on and \
+commitment_context.
+If it's a new task/goal, include committed_on and commitment_context in the create frontmatter."""
 
 
 def build_system_prompt(schema: dict, vault_path: str | None = None) -> tuple[str, dict[str, str]]:
@@ -1137,11 +1153,79 @@ class MentorAgent:
                 )
         return result
 
+    @staticmethod
+    def _build_proactive_alerts(alerts: dict) -> str:
+        """Build the PROACTIVE ALERTS injection for the system prompt.
+
+        Returns an empty string when there are nothing to surface.
+        Caps at 5 broken streaks + 3 overdue commitments to avoid prompt bloat.
+        """
+        broken = alerts.get("broken_streaks", [])[:5]
+        at_risk = alerts.get("at_risk_streaks", [])
+        overdue = alerts.get("overdue_commitments", [])[:3]
+
+        if not broken and not at_risk and not overdue:
+            return ""
+
+        lines = [
+            "\n\nPROACTIVE ALERTS — raise these naturally when relevant. "
+            "Don't lead with all of them at once. "
+            "Pick the most relevant 1-2 based on what the user is talking about.",
+        ]
+
+        if broken:
+            lines.append("\nBROKEN STREAKS:")
+            for s in broken:
+                last = s.get("last_completed")
+                days = s.get("days_since_last")
+                if last and days is not None:
+                    lines.append(
+                        f'- "{s["habit_title"]}" — last completed {days} day{"s" if days != 1 else ""} ago, streak broken.'
+                    )
+                else:
+                    lines.append(f'- "{s["habit_title"]}" — no completions recorded, streak broken.')
+
+        if at_risk:
+            lines.append("\nAT RISK:")
+            for s in at_risk:
+                days = s.get("days_since_last")
+                freq = s.get("frequency", "weekly")
+                lines.append(
+                    f'- "{s["habit_title"]}" — last completed {days} day{"s" if days != 1 else ""} ago, '
+                    f"at risk of breaking ({freq} frequency)."
+                )
+
+        if overdue:
+            lines.append("\nOVERDUE COMMITMENTS:")
+            for item in overdue:
+                title = item.get("title", item.get("node_id", "?"))
+                ntype = item.get("type", "")
+                priority = item.get("priority", "medium")
+                days_over = item.get("days_overdue", 0)
+                due = item.get("due", "")
+                committed_on = item.get("committed_on")
+                ctx = item.get("commitment_context")
+                consequences = item.get("consequences", [])
+
+                line = f'- "{title}" ({ntype}, {priority} priority) — {days_over} day{"s" if days_over != 1 else ""} overdue (due {due}).'
+                if committed_on and ctx:
+                    line += f' Committed {committed_on}: "{ctx}"'
+                elif committed_on:
+                    line += f" Committed {committed_on}."
+                lines.append(line)
+
+                if consequences:
+                    parts = [f'"{c["title"]}" ({c["type"]})' for c in consequences[:3]]
+                    lines.append(f'  → Consequences: {", ".join(parts)}')
+
+        return "\n".join(lines)
+
     def chat_stream(self, message: str, conversation_history: list[dict],
                     dismissed_ids: list[str] | None = None,
                     conflicts: list[dict] | None = None,
                     mode: str = "mirror",
-                    challenges: dict | None = None):
+                    challenges: dict | None = None,
+                    alerts: dict | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -1152,6 +1236,7 @@ class MentorAgent:
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_proactive_alerts(alerts or {})
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
         system += self._build_challenge_note(challenges or {})
@@ -1230,7 +1315,8 @@ class MentorAgent:
              dismissed_ids: list[str] | None = None,
              conflicts: list[dict] | None = None,
              mode: str = "mirror",
-             challenges: dict | None = None) -> dict:
+             challenges: dict | None = None,
+             alerts: dict | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
@@ -1238,11 +1324,13 @@ class MentorAgent:
         conflicts: detected conflicts between the message and existing graph nodes.
         mode: communication mode (mirror/advisor/guardian/dialectic).
         challenges: active challenge ladder states keyed by node_id.
+        alerts: proactive accountability alerts (broken streaks, overdue commitments).
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_proactive_alerts(alerts or {})
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
         system += self._build_challenge_note(challenges or {})

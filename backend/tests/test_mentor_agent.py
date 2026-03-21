@@ -835,3 +835,222 @@ class TestSoulChallengeLadderParsed:
         with open(candidate, "r", encoding="utf-8") as f:
             soul_content = f.read()
         assert "Challenge Ladder" in soul_content
+
+
+# ── Proactive Alerts ──
+
+
+class TestBuildProactiveAlerts:
+    """Test MentorAgent._build_proactive_alerts()."""
+
+    def _agent(self):
+        """Build a minimal MentorAgent instance without API calls."""
+        from unittest.mock import MagicMock
+        schema = {"type_list": ["goal", "task", "habit"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+        return agent
+
+    def test_proactive_alerts_empty_no_output(self):
+        """No alerts → empty string returned."""
+        agent = self._agent()
+        result = agent._build_proactive_alerts({})
+        assert result == ""
+
+    def test_proactive_alerts_all_on_track_no_output(self):
+        """Only on_track entries → no section injected."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert result == ""
+
+    def test_proactive_alerts_broken_streaks(self):
+        """Broken streak appears in formatted output."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [{
+                "habit_id": "gym",
+                "habit_title": "Strength Training",
+                "frequency": "3x/week",
+                "streak_status": "broken",
+                "last_completed": "2026-03-09",
+                "days_since_last": 12,
+            }],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "PROACTIVE ALERTS" in result
+        assert "Strength Training" in result
+        assert "BROKEN STREAKS" in result
+        assert "12" in result
+
+    def test_proactive_alerts_overdue_with_consequences(self):
+        """Overdue commitment with consequences formatted correctly."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [],
+            "at_risk_streaks": [],
+            "overdue_commitments": [{
+                "node_id": "finish-pr",
+                "title": "Finish PR Review",
+                "type": "task",
+                "priority": "high",
+                "due": "2026-03-18",
+                "days_overdue": 3,
+                "committed_on": "2026-03-15",
+                "commitment_context": "Told Sarah I'd review by Tuesday",
+                "consequences": [
+                    {"node_id": "promotion-goal", "title": "Get Promoted", "type": "goal", "relationship": "supported_by"},
+                ],
+            }],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "OVERDUE COMMITMENTS" in result
+        assert "Finish PR Review" in result
+        assert "3 days overdue" in result
+        assert "Told Sarah" in result
+        assert "Get Promoted" in result
+
+    def test_proactive_alerts_at_risk(self):
+        """At-risk streak appears in AT RISK section."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [],
+            "at_risk_streaks": [{
+                "habit_id": "reading",
+                "habit_title": "Evening Reading",
+                "frequency": "weekly",
+                "streak_status": "at_risk",
+                "last_completed": "2026-03-15",
+                "days_since_last": 6,
+            }],
+            "overdue_commitments": [],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "AT RISK" in result
+        assert "Evening Reading" in result
+
+    def test_proactive_alerts_capped_streaks(self):
+        """More than 5 broken streaks → only 5 included."""
+        agent = self._agent()
+        broken = [
+            {
+                "habit_id": f"habit-{i}",
+                "habit_title": f"Habit {i}",
+                "frequency": "daily",
+                "streak_status": "broken",
+                "last_completed": "2026-03-01",
+                "days_since_last": 20,
+            }
+            for i in range(8)
+        ]
+        alerts = {"broken_streaks": broken, "at_risk_streaks": [], "overdue_commitments": []}
+        result = agent._build_proactive_alerts(alerts)
+        # Only 5 habits should appear
+        count = sum(1 for i in range(8) if f"Habit {i}" in result)
+        assert count == 5
+
+    def test_proactive_alerts_capped_overdue(self):
+        """More than 3 overdue commitments → only 3 included."""
+        agent = self._agent()
+        overdue = [
+            {
+                "node_id": f"task-{i}",
+                "title": f"Task {i}",
+                "type": "task",
+                "priority": "medium",
+                "due": "2026-03-15",
+                "days_overdue": i + 1,
+                "committed_on": None,
+                "commitment_context": None,
+                "consequences": [],
+            }
+            for i in range(6)
+        ]
+        alerts = {"broken_streaks": [], "at_risk_streaks": [], "overdue_commitments": overdue}
+        result = agent._build_proactive_alerts(alerts)
+        count = sum(1 for i in range(6) if f"Task {i}" in result)
+        assert count == 3
+
+    def test_system_prompt_includes_alerts_when_present(self):
+        """System prompt contains 'PROACTIVE ALERTS' when broken streaks exist."""
+        from unittest.mock import MagicMock, patch
+        schema = {"type_list": ["goal", "task", "habit"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        g = MagicMock()
+        g.get_all_nodes.return_value = []
+        agent.graph = g
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = "{context}{today}"
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+
+        alerts = {
+            "broken_streaks": [{
+                "habit_id": "gym",
+                "habit_title": "Gym",
+                "frequency": "daily",
+                "streak_status": "broken",
+                "last_completed": "2026-03-01",
+                "days_since_last": 20,
+            }],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+        }
+        prompt_section = agent._build_proactive_alerts(alerts)
+        assert "PROACTIVE ALERTS" in prompt_section
+
+    def test_alerts_not_in_prompt_when_empty(self):
+        """No alerts → _build_proactive_alerts returns empty string."""
+        from unittest.mock import MagicMock
+        schema = {"type_list": ["goal", "task", "habit"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+
+        result = agent._build_proactive_alerts({
+            "broken_streaks": [],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+        })
+        assert result == ""
+
+
+# ── FORMAT_SPEC Commitment Section ──
+
+
+class TestFormatSpecCommitments:
+    """Test that _GRAPH_INSTRUCTIONS contains the commitment detection section."""
+
+    def test_format_spec_contains_commitment_section(self):
+        """_GRAPH_INSTRUCTIONS contains '8. COMMITMENTS' section."""
+        from mentor_agent import _GRAPH_INSTRUCTIONS
+        assert "COMMITMENTS" in _GRAPH_INSTRUCTIONS
+
+    def test_format_spec_commitment_rules_mention_committed_on(self):
+        """Commitment section references the committed_on field."""
+        from mentor_agent import _GRAPH_INSTRUCTIONS
+        assert "committed_on" in _GRAPH_INSTRUCTIONS
+
+    def test_format_spec_commitment_rules_mention_context(self):
+        """Commitment section references commitment_context field."""
+        from mentor_agent import _GRAPH_INSTRUCTIONS
+        assert "commitment_context" in _GRAPH_INSTRUCTIONS
