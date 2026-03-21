@@ -1054,3 +1054,284 @@ class TestFormatSpecCommitments:
         """Commitment section references commitment_context field."""
         from mentor_agent import _GRAPH_INSTRUCTIONS
         assert "commitment_context" in _GRAPH_INSTRUCTIONS
+
+# ── State Note ──
+
+
+class TestBuildStateNote:
+    """Test MentorAgent._build_state_note()."""
+
+    def test_state_note_default_empty(self):
+        """Normal energy + no stress → empty string (no noise injected)."""
+        state = {"energy": "normal", "stress": "none", "confidence": "low", "signals": []}
+        result = MentorAgent._build_state_note(state)
+        assert result == ""
+
+    def test_state_note_empty_dict(self):
+        """Empty dict → empty string."""
+        assert MentorAgent._build_state_note({}) == ""
+
+    def test_state_note_elevated_stress(self):
+        """Elevated stress → note includes stress guidance."""
+        state = {
+            "energy": "low",
+            "stress": "elevated",
+            "confidence": "medium",
+            "signals": [
+                {"type": "brevity", "detail": "avg 15 chars"},
+                {"type": "late_night", "detail": "2 messages after midnight"},
+            ],
+        }
+        result = MentorAgent._build_state_note(state)
+        assert "USER STATE" in result
+        assert "elevated" in result
+        assert "stress is elevated" in result
+        assert "brevity" in result
+        assert "late_night" in result
+
+    def test_state_note_high_energy(self):
+        """High energy → note includes momentum guidance."""
+        state = {
+            "energy": "high",
+            "stress": "none",
+            "confidence": "high",
+            "signals": [{"type": "idea_density", "detail": "5 new intentions detected"}],
+        }
+        result = MentorAgent._build_state_note(state)
+        assert "USER STATE" in result
+        assert "high" in result
+        assert "channel the momentum" in result.lower() or "Channel the momentum" in result
+
+    def test_state_note_low_energy(self):
+        """Low energy (non-stressed) → note includes recovery guidance."""
+        state = {
+            "energy": "low",
+            "stress": "mild",
+            "confidence": "medium",
+            "signals": [{"type": "brevity", "detail": "avg 10 chars"}],
+        }
+        result = MentorAgent._build_state_note(state)
+        assert "USER STATE" in result
+        assert "energy is low" in result.lower() or "low" in result
+
+    def test_state_note_low_confidence_hint(self):
+        """Low confidence → note includes hint qualifier."""
+        state = {
+            "energy": "low",
+            "stress": "mild",
+            "confidence": "low",
+            "signals": [{"type": "brevity", "detail": "avg 12 chars"}],
+        }
+        result = MentorAgent._build_state_note(state)
+        # Low confidence should still produce a note since stress != none
+        assert result != ""
+        assert "low confidence" in result.lower()
+
+    def test_state_note_includes_energy_stress_confidence(self):
+        """Note format includes Energy | Stress | Confidence line."""
+        state = {
+            "energy": "low",
+            "stress": "elevated",
+            "confidence": "high",
+            "signals": [],
+        }
+        result = MentorAgent._build_state_note(state)
+        assert "Energy: low" in result
+        assert "Stress: elevated" in result
+        assert "Confidence: high" in result
+
+
+# ── State-aware alert capping ──
+
+
+class TestProactiveAlertsStateAware:
+    """Test that _build_proactive_alerts() respects state-aware caps."""
+
+    def _agent(self):
+        from unittest.mock import MagicMock
+        schema = {"type_list": ["goal", "task", "habit"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+        return agent
+
+    def _make_broken_streaks(self, count: int) -> list[dict]:
+        return [
+            {
+                "habit_id": f"habit-{i}",
+                "habit_title": f"Habit {i}",
+                "frequency": "daily",
+                "streak_status": "broken",
+                "last_completed": "2026-03-01",
+                "days_since_last": 20,
+            }
+            for i in range(count)
+        ]
+
+    def test_proactive_alerts_capped_when_stressed(self):
+        """Elevated stress + medium confidence + 5 alerts → only 1 in output."""
+        agent = self._agent()
+        broken = self._make_broken_streaks(5)
+        alerts = {"broken_streaks": broken, "at_risk_streaks": [], "overdue_commitments": []}
+        state = {"stress": "elevated", "energy": "low", "confidence": "medium", "signals": []}
+        result = agent._build_proactive_alerts(alerts, state=state)
+        # Only 1 habit should appear
+        count = sum(1 for i in range(5) if f"Habit {i}" in result)
+        assert count == 1
+
+    def test_proactive_alerts_capped_when_low_energy(self):
+        """Low energy + medium confidence + 5 alerts → only 2 in output."""
+        agent = self._agent()
+        broken = self._make_broken_streaks(5)
+        alerts = {"broken_streaks": broken, "at_risk_streaks": [], "overdue_commitments": []}
+        state = {"stress": "none", "energy": "low", "confidence": "medium", "signals": []}
+        result = agent._build_proactive_alerts(alerts, state=state)
+        count = sum(1 for i in range(5) if f"Habit {i}" in result)
+        assert count == 2
+
+    def test_proactive_alerts_normal_no_cap_change(self):
+        """Normal state → standard cap of 5 broken streaks applies."""
+        agent = self._agent()
+        broken = self._make_broken_streaks(7)
+        alerts = {"broken_streaks": broken, "at_risk_streaks": [], "overdue_commitments": []}
+        state = {"stress": "none", "energy": "normal", "confidence": "low", "signals": []}
+        result = agent._build_proactive_alerts(alerts, state=state)
+        count = sum(1 for i in range(7) if f"Habit {i}" in result)
+        assert count == 5
+
+    def test_proactive_alerts_low_confidence_no_suppression(self):
+        """Low confidence stressed state → no suppression (standard caps)."""
+        agent = self._agent()
+        broken = self._make_broken_streaks(5)
+        alerts = {"broken_streaks": broken, "at_risk_streaks": [], "overdue_commitments": []}
+        state = {"stress": "elevated", "energy": "low", "confidence": "low", "signals": []}
+        result = agent._build_proactive_alerts(alerts, state=state)
+        # low confidence → no suppression → 5 shown
+        count = sum(1 for i in range(5) if f"Habit {i}" in result)
+        assert count == 5
+
+    def test_proactive_alerts_includes_fundamentals(self):
+        """Neglected fundamental appears in formatted output."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+            "neglected_fundamentals": [{
+                "fundamental": "movement",
+                "status": "neglected",
+                "days_since_activity": 16,
+                "related_habits": ["gym"],
+                "message": "No movement-related activity in 16 days.",
+            }],
+            "untracked_fundamentals": [],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "NEGLECTED FUNDAMENTALS" in result
+        assert "Movement" in result
+        assert "16 days" in result
+
+    def test_proactive_alerts_untracked_fundamentals(self):
+        """No-data fundamental appears with softer framing."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+            "neglected_fundamentals": [],
+            "untracked_fundamentals": [{
+                "fundamental": "nutrition",
+                "status": "no_data",
+                "days_since_activity": None,
+                "related_habits": [],
+                "message": "No nutrition habits tracked.",
+            }],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "UNTRACKED FUNDAMENTALS" in result
+        assert "Nutrition" in result
+
+    def test_proactive_alerts_fundamentals_capped(self):
+        """More than 3 neglected fundamentals → only 3 shown."""
+        agent = self._agent()
+        neglected = [
+            {
+                "fundamental": f"fund-{i}",
+                "status": "neglected",
+                "days_since_activity": 20,
+                "related_habits": [],
+                "message": f"Fund {i} neglected.",
+            }
+            for i in range(5)
+        ]
+        alerts = {
+            "broken_streaks": [],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+            "neglected_fundamentals": neglected,
+            "untracked_fundamentals": [],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        count = sum(1 for i in range(5) if f"Fund {i}" in result)
+        assert count == 3
+
+
+# ── SOUL.md State Awareness parsed ──
+
+
+class TestSoulStateAwarenessParsed:
+    """Test that _load_soul() captures the State Awareness section."""
+
+    def test_soul_state_awareness_parsed(self):
+        """'state awareness' key present in parsed sections from SOUL.md."""
+        import os
+        search_paths = [
+            os.path.join(os.path.dirname(__file__), "..", "..", "SOUL.md"),
+            os.path.join(os.path.dirname(__file__), "..", "SOUL.md"),
+        ]
+        soul_path = None
+        for p in search_paths:
+            candidate = os.path.abspath(p)
+            if os.path.isfile(candidate):
+                soul_path = candidate
+                break
+
+        if soul_path is None:
+            pytest.skip("SOUL.md not found — skipping soul parsing test")
+
+        with open(soul_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        sections: dict[str, str] = {}
+        current_heading = None
+        current_lines: list[str] = []
+        for line in content.split("\n"):
+            if line.startswith("## "):
+                if current_heading:
+                    sections[current_heading] = "\n".join(current_lines).strip()
+                current_heading = line[3:].strip().lower()
+                current_lines = []
+            elif current_heading is not None:
+                current_lines.append(line)
+        if current_heading:
+            sections[current_heading] = "\n".join(current_lines).strip()
+
+        assert "state awareness" in sections
+
+    def test_system_prompt_includes_state_awareness(self):
+        """SOUL.md contains 'State Awareness' text."""
+        import os
+        candidate = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "SOUL.md")
+        )
+        if not os.path.isfile(candidate):
+            pytest.skip("SOUL.md not found")
+
+        with open(candidate, "r", encoding="utf-8") as f:
+            soul_content = f.read()
+        assert "State Awareness" in soul_content

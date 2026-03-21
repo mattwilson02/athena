@@ -1,7 +1,7 @@
 {
-  "sprint": 4,
+  "sprint": 5,
   "phase": "pr",
-  "specName": "sprint-4-accountability-foundation",
-  "specPath": "/Users/matt/development/athena/docs/sprints/sprint-4-accountability-foundation.md",
-  "branchName": "sprint/sprint-4-accountability-foundation"
+  "specName": "sprint-5-state-inference-and-fundamentals",
+  "specPath": "/Users/matt/development/athena/docs/sprints/sprint-5-state-inference-and-fundamentals.md",
+  "branchName": "sprint/sprint-5-state-inference-and-fundamentals"
 }

@@ -9,6 +9,35 @@ from mentor_agent import _get_permanence
 
 logger = logging.getLogger(__name__)
 
+# Keyword mapping from habit title/tags to fundamental categories.
+_FUNDAMENTAL_KEYWORDS: dict[str, list[str]] = {
+    "movement": [
+        "gym", "training", "workout", "exercise", "run", "running", "walk",
+        "cycling", "swim", "climbing", "yoga", "strength", "cardio", "stretch",
+        "sport", "physical", "fitness", "steps",
+    ],
+    "sleep": [
+        "sleep", "bed", "bedtime", "wake", "morning routine", "rest", "nap",
+        "insomnia", "tired",
+    ],
+    "nutrition": [
+        "meal", "food", "diet", "eat", "cooking", "breakfast", "lunch",
+        "dinner", "hydrat", "water intake", "nutrition", "fast", "fasting",
+    ],
+    "connection": [
+        "friend", "family", "partner", "social", "call", "meet",
+        "dinner with", "catch up", "hangout", "date night", "relationship",
+    ],
+    "purpose": [
+        "project", "goal", "career", "learn", "study", "create", "build",
+        "write", "reading", "skill", "course", "side project", "work on",
+    ],
+    "financial_stability": [
+        "budget", "saving", "expense", "finance", "income",
+        "investment", "debt", "rent", "salary",
+    ],
+}
+
 # Statuses that mean a node is resolved — skip for streak/overdue detection.
 _RESOLVED_STATUSES = {
     "completed", "done", "achieved", "overcome",
@@ -287,3 +316,116 @@ def trace_consequences(graph, node_id: str, max_hops: int = 2) -> list[dict]:
         key=lambda c: _PERM_ORDER.get(_get_permanence(c.get("type", ""))[0], 2)
     )
     return consequences
+
+
+def _habit_matches_fundamental(habit: dict, keywords: list[str]) -> bool:
+    """Return True if the habit's title or tags match any keyword (case-insensitive)."""
+    title = (habit.get("title") or "").lower()
+    tags = habit.get("tags") or []
+    tag_str = " ".join(str(t) for t in tags).lower() if tags else ""
+    combined = f"{title} {tag_str}"
+    return any(kw in combined for kw in keywords)
+
+
+def check_fundamentals(
+    graph, today: date, include_active: bool = False
+) -> list[dict]:
+    """Check whether core human needs have been neglected for 2+ weeks.
+
+    For each fundamental category, finds habits matching category keywords,
+    determines the most recent activity date across all matched habits, and
+    reports neglected (>14 days) or no_data (no matching habits) categories.
+
+    Args:
+        graph: VaultGraph instance.
+        today: Reference date for recency calculations.
+        include_active: If True, also return active (≤14 days) fundamentals.
+                        Default False — only neglected and no_data are returned.
+
+    Returns:
+        List of fundamental reports with keys:
+            fundamental, status, days_since_activity, related_habits, message
+    """
+    all_habits = graph.get_nodes_by_type("habit")
+    results: list[dict] = []
+
+    for fundamental, keywords in _FUNDAMENTAL_KEYWORDS.items():
+        # Find all habits matching this fundamental (including lapsed ones)
+        matched_habits = [h for h in all_habits if _habit_matches_fundamental(h, keywords)]
+
+        if not matched_habits:
+            entry: dict = {
+                "fundamental": fundamental,
+                "status": "no_data",
+                "days_since_activity": None,
+                "related_habits": [],
+                "message": f"No {fundamental.replace('_', ' ')} habits tracked.",
+            }
+            results.append(entry)
+            continue
+
+        related_habit_ids = [h["id"] for h in matched_habits]
+
+        # Collect all daily dates from linked daily nodes across all matched habits.
+        all_daily_dates: list[date] = []
+        seen_ids: set[str] = set()
+
+        for habit in matched_habits:
+            habit_id = habit["id"]
+            for neighbor in graph.get_neighbors_with_edges(habit_id):
+                nid = neighbor.get("id")
+                if nid in seen_ids:
+                    continue
+                seen_ids.add(nid)
+                if neighbor.get("type") == "daily":
+                    d = _parse_date(neighbor.get("date"))
+                    if d is not None:
+                        all_daily_dates.append(d)
+
+        if not all_daily_dates:
+            # Habits exist but no dailies recorded — treat as neglected
+            entry = {
+                "fundamental": fundamental,
+                "status": "neglected",
+                "days_since_activity": None,
+                "related_habits": related_habit_ids,
+                "message": (
+                    f"No {fundamental.replace('_', ' ')}-related activity recorded. "
+                    f"Related habits: {', '.join(h.get('title', hid) for h, hid in zip(matched_habits, related_habit_ids))}."
+                ),
+            }
+            results.append(entry)
+            continue
+
+        most_recent = max(all_daily_dates)
+        days_since = (today - most_recent).days
+
+        if days_since > 14:
+            status = "neglected"
+            # Build habit names for message
+            habit_names = [h.get("title", h["id"]) for h in matched_habits]
+            last_str = most_recent.strftime("%b %-d")
+            message = (
+                f"No {fundamental.replace('_', ' ')}-related activity in {days_since} days. "
+                f"Related habits: {', '.join(habit_names)} (last: {last_str})."
+            )
+            entry = {
+                "fundamental": fundamental,
+                "status": "neglected",
+                "days_since_activity": days_since,
+                "related_habits": related_habit_ids,
+                "message": message,
+            }
+            results.append(entry)
+        else:
+            if include_active:
+                entry = {
+                    "fundamental": fundamental,
+                    "status": "active",
+                    "days_since_activity": days_since,
+                    "related_habits": related_habit_ids,
+                    "message": None,
+                }
+                results.append(entry)
+
+    return results

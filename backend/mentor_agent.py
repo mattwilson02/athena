@@ -1154,17 +1154,111 @@ class MentorAgent:
         return result
 
     @staticmethod
-    def _build_proactive_alerts(alerts: dict) -> str:
+    def _build_state_note(state: dict) -> str:
+        """Build the USER STATE injection for the system prompt.
+
+        Returns empty string when state is default (normal energy, no stress)
+        to avoid injecting noise.
+        """
+        if not state:
+            return ""
+
+        energy = state.get("energy", "normal")
+        stress = state.get("stress", "none")
+        confidence = state.get("confidence", "low")
+        signals = state.get("signals", [])
+
+        # Default state — no injection needed
+        if energy == "normal" and stress == "none":
+            return ""
+
+        signal_parts = [
+            f"{s['type']} ({s['detail']})" for s in signals if s.get("detail")
+        ]
+        signal_text = ", ".join(signal_parts) if signal_parts else "none"
+
+        lines = [
+            "\n\nUSER STATE — adjust your tone and priorities based on the user's current state.",
+            f"\nEnergy: {energy} | Stress: {stress} | Confidence: {confidence}",
+            f"Signals: {signal_text}",
+        ]
+
+        if confidence == "low":
+            lines.append("(low confidence — treat as a hint, not a diagnosis)")
+
+        if stress == "elevated":
+            lines.append(
+                "\nWhen stress is elevated:\n"
+                "- Lead with acknowledgment, not obligations\n"
+                "- Hold non-urgent proactive alerts for a better moment\n"
+                "- Keep responses shorter than usual\n"
+                "- Don't pile on with accountability — one thing at a time"
+            )
+
+        if energy == "high":
+            lines.append(
+                "\nWhen energy is high:\n"
+                "- Channel the momentum — help them prioritise rather than dampen\n"
+                "- Flag overcommitting risk if idea density is high\n"
+                "- Good time to surface strategic planning"
+            )
+
+        if energy == "low":
+            lines.append(
+                "\nWhen energy is low:\n"
+                "- Protect their time and attention\n"
+                "- Suggest recovery, not productivity\n"
+                "- Only raise truly urgent alerts"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_proactive_alerts(alerts: dict, state: dict | None = None) -> str:
         """Build the PROACTIVE ALERTS injection for the system prompt.
 
-        Returns an empty string when there are nothing to surface.
+        Returns an empty string when there is nothing to surface.
         Caps at 5 broken streaks + 3 overdue commitments to avoid prompt bloat.
+        State-aware suppression: elevated stress → 1 total alert; low energy → 2 total.
         """
         broken = alerts.get("broken_streaks", [])[:5]
         at_risk = alerts.get("at_risk_streaks", [])
         overdue = alerts.get("overdue_commitments", [])[:3]
+        neglected = alerts.get("neglected_fundamentals", [])[:3]
+        untracked = alerts.get("untracked_fundamentals", [])[:2]
 
-        if not broken and not at_risk and not overdue:
+        # State-aware suppression
+        _state = state or {}
+        confidence = _state.get("confidence", "low")
+        stress = _state.get("stress", "none")
+        energy = _state.get("energy", "normal")
+
+        total_cap: int | None = None
+        if confidence in ("medium", "high"):
+            if stress == "elevated":
+                total_cap = 1
+            elif energy == "low":
+                total_cap = 2
+
+        if total_cap is not None:
+            # Prioritize overdue > broken > at_risk, apply cap
+            remaining = total_cap
+            overdue = overdue[:remaining]
+            remaining = max(0, remaining - len(overdue))
+            broken = broken[:remaining]
+            remaining = max(0, remaining - len(broken))
+            at_risk = at_risk[:remaining]
+            # Suppress fundamentals when stressed/low-energy to avoid overload
+            if stress == "elevated":
+                neglected = []
+                untracked = []
+            else:
+                remaining = max(0, total_cap - len(overdue) - len(broken) - len(at_risk))
+                neglected = neglected[:remaining]
+                remaining = max(0, remaining - len(neglected))
+                untracked = untracked[:remaining]
+
+        if not broken and not at_risk and not overdue and not neglected and not untracked:
             return ""
 
         lines = [
@@ -1218,6 +1312,24 @@ class MentorAgent:
                     parts = [f'"{c["title"]}" ({c["type"]})' for c in consequences[:3]]
                     lines.append(f'  → Consequences: {", ".join(parts)}')
 
+        if neglected:
+            lines.append(
+                "\nNEGLECTED FUNDAMENTALS — these core human needs haven't had activity in 2+ weeks:"
+            )
+            for f in neglected:
+                name = f["fundamental"].replace("_", " ").title()
+                msg = f.get("message", "")
+                lines.append(f"- {name} — {msg}")
+                lines.append("  This is a species-level need. Don't lecture — ask what's getting in the way.")
+
+        if untracked:
+            lines.append(
+                "\nUNTRACKED FUNDAMENTALS — the user has no habits tracking these:"
+            )
+            for f in untracked:
+                name = f["fundamental"].replace("_", " ").title()
+                lines.append(f"- {name} — consider suggesting a {name.lower()}-related habit.")
+
         return "\n".join(lines)
 
     def chat_stream(self, message: str, conversation_history: list[dict],
@@ -1225,7 +1337,8 @@ class MentorAgent:
                     conflicts: list[dict] | None = None,
                     mode: str = "mirror",
                     challenges: dict | None = None,
-                    alerts: dict | None = None):
+                    alerts: dict | None = None,
+                    state: dict | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -1236,7 +1349,8 @@ class MentorAgent:
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
-        system += self._build_proactive_alerts(alerts or {})
+        system += self._build_state_note(state or {})
+        system += self._build_proactive_alerts(alerts or {}, state=state)
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
         system += self._build_challenge_note(challenges or {})
@@ -1316,7 +1430,8 @@ class MentorAgent:
              conflicts: list[dict] | None = None,
              mode: str = "mirror",
              challenges: dict | None = None,
-             alerts: dict | None = None) -> dict:
+             alerts: dict | None = None,
+             state: dict | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
@@ -1325,12 +1440,14 @@ class MentorAgent:
         mode: communication mode (mirror/advisor/guardian/dialectic).
         challenges: active challenge ladder states keyed by node_id.
         alerts: proactive accountability alerts (broken streaks, overdue commitments).
+        state: inferred user state (energy, stress, confidence) from recent messages.
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
-        system += self._build_proactive_alerts(alerts or {})
+        system += self._build_state_note(state or {})
+        system += self._build_proactive_alerts(alerts or {}, state=state)
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
         system += self._build_challenge_note(challenges or {})

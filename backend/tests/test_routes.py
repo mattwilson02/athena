@@ -639,3 +639,81 @@ class TestAccountabilityErrorHandling:
         assert resp.status_code == 200
         data = resp.get_json()
         assert "response" in data
+
+
+# ── State Inference Error Handling ────────────────────────────────────────
+
+
+class TestStateInferenceErrorHandling:
+
+    def test_state_inference_error_doesnt_break_chat(self, client):
+        """Mock state_service.infer_state to raise → chat proceeds with empty state."""
+        from unittest.mock import patch
+
+        create_resp = client.post("/api/chat/sessions")
+        sid = create_resp.get_json()["id"]
+
+        with patch(
+            "services.state_service.infer_state",
+            side_effect=RuntimeError("state inference exploded"),
+        ):
+            resp = client.post("/api/chat", json={
+                "session_id": sid,
+                "message": "Hello Athena",
+            })
+        # Chat should still succeed even if state inference fails
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "response" in data
+
+
+# ── Fundamentals in Accountability Endpoint ───────────────────────────────
+
+
+class TestAccountabilityFundamentals:
+
+    def test_accountability_endpoint_returns_fundamentals(self, client):
+        """GET /api/accountability response includes 'fundamentals' key."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "fundamentals" in data
+        assert "fundamentals_summary" in data
+
+    def test_accountability_fundamentals_is_list(self, client):
+        """fundamentals is a list."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data["fundamentals"], list)
+
+    def test_accountability_fundamentals_summary_counts(self, client):
+        """fundamentals_summary totals match the array."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        fundamentals = data["fundamentals"]
+        summary = data["fundamentals_summary"]
+        assert summary["total"] == len(fundamentals)
+        assert summary["active"] + summary["neglected"] + summary["no_data"] == summary["total"]
+
+    def test_accountability_fundamentals_all_statuses(self, client):
+        """fundamentals entries have valid status values."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        valid_statuses = {"active", "neglected", "no_data"}
+        for f in data["fundamentals"]:
+            assert f["status"] in valid_statuses
+
+    def test_accountability_fundamentals_error_handling(self, client, app):
+        """check_fundamentals raises → 500 response."""
+        from unittest.mock import patch
+        with patch(
+            "routes.graph_routes.check_fundamentals",
+            side_effect=RuntimeError("fundamentals boom"),
+        ):
+            resp = client.get("/api/accountability")
+            assert resp.status_code == 500
+            data = resp.get_json()
+            assert "error" in data

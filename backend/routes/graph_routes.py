@@ -11,7 +11,7 @@ from datetime import date as _date
 import anthropic
 from flask import Blueprint, current_app, jsonify, request
 
-from services.accountability_service import calculate_streaks, find_overdue_commitments
+from services.accountability_service import calculate_streaks, find_overdue_commitments, check_fundamentals
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ def activity():
 
 @graph_bp.route("/api/accountability", methods=["GET"])
 def get_accountability():
-    """Return current accountability state: streaks, overdue commitments, summary."""
+    """Return current accountability state: streaks, overdue commitments, fundamentals, summary."""
     g = current_app.config["graph"]
     try:
         streaks = calculate_streaks(g)
@@ -150,10 +150,21 @@ def get_accountability():
         logger.exception("Accountability service error")
         return jsonify({"error": "Failed to compute accountability state"}), 500
 
+    try:
+        # include_active=True so the dashboard shows a complete picture of all 6 fundamentals
+        fundamentals = check_fundamentals(g, _date.today(), include_active=True)
+    except Exception:
+        logger.exception("Fundamentals check error")
+        return jsonify({"error": "Failed to compute fundamentals state"}), 500
+
     on_track = sum(1 for s in streaks if s["streak_status"] == "on_track")
     at_risk = sum(1 for s in streaks if s["streak_status"] == "at_risk")
     broken = sum(1 for s in streaks if s["streak_status"] == "broken")
     oldest_overdue = max((o["days_overdue"] for o in overdue), default=0)
+
+    f_active = sum(1 for f in fundamentals if f["status"] == "active")
+    f_neglected = sum(1 for f in fundamentals if f["status"] == "neglected")
+    f_no_data = sum(1 for f in fundamentals if f["status"] == "no_data")
 
     return jsonify({
         "streaks": streaks,
@@ -165,6 +176,13 @@ def get_accountability():
             "broken": broken,
             "overdue_count": len(overdue),
             "oldest_overdue_days": oldest_overdue,
+        },
+        "fundamentals": fundamentals,
+        "fundamentals_summary": {
+            "total": len(fundamentals),
+            "active": f_active,
+            "neglected": f_neglected,
+            "no_data": f_no_data,
         },
     })
 
