@@ -10,9 +10,22 @@ from pathlib import Path
 
 import yaml
 
+from mentor_agent import _get_permanence
 from middleware.security import safe_resolve
 
 logger = logging.getLogger(__name__)
+
+# Warning messages by permanence level — added to cascade proposals and direct updates.
+_PERMANENCE_WARNINGS: dict[str, str] = {
+    "fundamental": (
+        "This would modify a human fundamental (movement/sleep/nutrition/connection/purpose/stability). "
+        "These are species-level needs — reshapeable but not removable."
+    ),
+    "identity": (
+        "This would modify a core value, belief, or fear (identity-level). "
+        "Changes here reshape who you are."
+    ),
+}
 
 
 class VaultService:
@@ -386,7 +399,17 @@ class VaultService:
         # --- Step 3: Limit and rank (graph first, then semantic) ---
         graph_proposals = [p for p in proposals if p.get("confidence") == "graph"][:3]
         semantic_proposals = [p for p in proposals if p.get("confidence") == "semantic"][:2]
-        return graph_proposals + semantic_proposals
+        result_proposals = graph_proposals + semantic_proposals
+
+        # --- Step 4: Annotate proposals targeting identity/fundamental nodes ---
+        for proposal in result_proposals:
+            p_type = proposal.get("type", "")
+            level, _ = _get_permanence(p_type)
+            warning = _PERMANENCE_WARNINGS.get(level)
+            if warning:
+                proposal["permanence_warning"] = warning
+
+        return result_proposals
 
     def find_cross_references(self, node_id: str, max_suggestions: int = 5) -> list[dict]:
         """Find potential links for a node by scanning existing nodes."""

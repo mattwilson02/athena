@@ -196,6 +196,63 @@ class ChatStore:
             return []
         return session.get("pending_updates", [])
 
+    # ── Challenge ladder state ──
+
+    def get_challenge_state(self, session_id: str, node_id: str) -> dict | None:
+        """Return the challenge state for a node, or None if no active challenge."""
+        session = self._read(session_id)
+        if session is None:
+            return None
+        return session.get("challenge_state", {}).get(node_id)
+
+    def set_challenge_state(self, session_id: str, node_id: str, state: dict) -> bool:
+        """Create or update challenge state for a node. Returns False if session not found."""
+        session = self._read(session_id)
+        if session is None:
+            return False
+        challenge_state = session.setdefault("challenge_state", {})
+        challenge_state[node_id] = state
+        self._write(session)
+        return True
+
+    def advance_challenge(self, session_id: str, node_id: str) -> dict | None:
+        """Increment step by 1, append to history. Returns updated state or None."""
+        session = self._read(session_id)
+        if session is None:
+            return None
+        state = session.get("challenge_state", {}).get(node_id)
+        if state is None:
+            return None
+        # Cap at step 5
+        if state["step"] < 5:
+            state["step"] += 1
+        state.setdefault("history", []).append({
+            "step": state["step"],
+            "action": "advanced",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        session["challenge_state"][node_id] = state
+        self._write(session)
+        return state
+
+    def clear_challenge(self, session_id: str, node_id: str) -> bool:
+        """Remove challenge state for a node. Returns False if session not found."""
+        session = self._read(session_id)
+        if session is None:
+            return False
+        challenge_state = session.get("challenge_state", {})
+        challenge_state.pop(node_id, None)
+        session["challenge_state"] = challenge_state
+        self._write(session)
+        return True
+
+    def get_active_challenges(self, session_id: str) -> dict:
+        """Return the full challenge_state dict for a session."""
+        session = self._read(session_id)
+        if session is None:
+            return {}
+        return session.get("challenge_state", {})
+
     def get_session_node_ids(self, session_id: str) -> set[str]:
         """Return set of all node IDs from graph_updates in this session."""
         session = self._read(session_id)

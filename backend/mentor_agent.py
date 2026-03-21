@@ -1033,6 +1033,47 @@ class MentorAgent:
         )
         return context, top_results
 
+    @staticmethod
+    def _build_challenge_note(challenges: dict) -> str:
+        """Build the CHALLENGE LADDER injection for the system prompt."""
+        if not challenges:
+            return ""
+
+        _STEP_NAMES = {
+            1: "flag",
+            2: "investigate",
+            3: "escalate",
+            4: "challenge",
+            5: "accept",
+        }
+        _STEP_INSTRUCTIONS = {
+            1: "Flag the gap. Name the node being changed and what it means in the context of the user's identity. Do not accept the change.",
+            2: "Investigate. Ask what's driving this change — is something blocking them? Injury, schedule, motivation? Don't accept yet.",
+            3: "Escalate. Reference how long this pattern has been active. Surface what happened last time they considered this change, if known. One sentence of history.",
+            4: "Challenge the shift directly. List what this change contradicts — other goals, beliefs, anti-goals. Ask: are you sure? This changes who you are.",
+            5: "Accept with full context. The user has defended this change through 4 steps. Record why in the update. This is a conscious, earned change.",
+        }
+
+        lines = ["CHALLENGE LADDER — the following identity-level changes are being contested:\n"]
+        for node_id, state in challenges.items():
+            step = state.get("step", 1)
+            title = state.get("node_title", node_id)
+            node_type = state.get("node_type", "")
+            permanence = state.get("permanence", "identity")
+            step_name = _STEP_NAMES.get(step, "flag")
+            instruction = _STEP_INSTRUCTIONS.get(step, _STEP_INSTRUCTIONS[1])
+            lines.append(f'Node: "{title}" ({node_type}, {permanence}-level)')
+            lines.append(f"Current step: {step} of 5 ({step_name})")
+            history = state.get("history", [])
+            if history:
+                lines.append("History:")
+                for entry in history:
+                    lines.append(f"  - Step {entry.get('step', '?')}: {entry.get('action', '?')}")
+            lines.append(f"Your task at step {step}: {instruction}")
+            lines.append("")
+
+        return "\n\nCHALLENGE LADDER\n" + "\n".join(lines)
+
     def _build_mode_note(self, mode: str) -> str:
         """Build the ACTIVE MODE injection for the system prompt."""
         if not mode:
@@ -1099,7 +1140,8 @@ class MentorAgent:
     def chat_stream(self, message: str, conversation_history: list[dict],
                     dismissed_ids: list[str] | None = None,
                     conflicts: list[dict] | None = None,
-                    mode: str = "mirror"):
+                    mode: str = "mirror",
+                    challenges: dict | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -1112,6 +1154,7 @@ class MentorAgent:
         system += self._build_dismissed_note(dismissed_ids or [])
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
+        system += self._build_challenge_note(challenges or {})
         messages = conversation_history + [{"role": "user", "content": message}]
 
         full_text = ""
@@ -1186,13 +1229,15 @@ class MentorAgent:
     def chat(self, message: str, conversation_history: list[dict],
              dismissed_ids: list[str] | None = None,
              conflicts: list[dict] | None = None,
-             mode: str = "mirror") -> dict:
+             mode: str = "mirror",
+             challenges: dict | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
         dismissed_ids: node IDs the user dismissed this session — injected into prompt.
         conflicts: detected conflicts between the message and existing graph nodes.
         mode: communication mode (mirror/advisor/guardian/dialectic).
+        challenges: active challenge ladder states keyed by node_id.
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
@@ -1200,6 +1245,7 @@ class MentorAgent:
         system += self._build_dismissed_note(dismissed_ids or [])
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
+        system += self._build_challenge_note(challenges or {})
 
         # Build messages: prior history + current user message
         messages = conversation_history + [{"role": "user", "content": message}]

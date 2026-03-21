@@ -277,3 +277,104 @@ class TestPendingUpdates:
         """wa- prefix accepts hex characters."""
         session = chat_store.get_or_create_session("wa-abc123def456")
         assert session["id"] == "wa-abc123def456"
+
+
+class TestChallengeState:
+    """Sprint 3: Challenge ladder state tracking per session."""
+
+    def test_challenge_state_default_empty(self, chat_store):
+        """New session has no challenge state."""
+        session = chat_store.create_session()
+        challenges = chat_store.get_active_challenges(session["id"])
+        assert challenges == {}
+
+    def test_set_and_get_challenge_state(self, chat_store):
+        """Set state for a node, retrieve it."""
+        session = chat_store.create_session()
+        state = {
+            "step": 1,
+            "node_title": "Discipline",
+            "node_type": "value",
+            "permanence": "identity",
+            "history": [{"step": 1, "action": "flagged", "timestamp": "2026-03-21T10:00:00+00:00"}],
+        }
+        ok = chat_store.set_challenge_state(session["id"], "discipline", state)
+        assert ok is True
+        retrieved = chat_store.get_challenge_state(session["id"], "discipline")
+        assert retrieved is not None
+        assert retrieved["step"] == 1
+        assert retrieved["node_title"] == "Discipline"
+
+    def test_advance_challenge_increments_step(self, chat_store):
+        """Step goes from 1 to 2."""
+        session = chat_store.create_session()
+        state = {"step": 1, "node_title": "Discipline", "node_type": "value", "permanence": "identity", "history": []}
+        chat_store.set_challenge_state(session["id"], "discipline", state)
+        updated = chat_store.advance_challenge(session["id"], "discipline")
+        assert updated is not None
+        assert updated["step"] == 2
+
+    def test_advance_challenge_caps_at_5(self, chat_store):
+        """Step 5 stays at 5, does not go to 6."""
+        session = chat_store.create_session()
+        state = {"step": 5, "node_title": "Discipline", "node_type": "value", "permanence": "identity", "history": []}
+        chat_store.set_challenge_state(session["id"], "discipline", state)
+        updated = chat_store.advance_challenge(session["id"], "discipline")
+        assert updated is not None
+        assert updated["step"] == 5
+
+    def test_advance_challenge_appends_history(self, chat_store):
+        """History grows with each advance."""
+        session = chat_store.create_session()
+        state = {"step": 1, "node_title": "Discipline", "node_type": "value", "permanence": "identity", "history": [{"step": 1, "action": "flagged", "timestamp": "t"}]}
+        chat_store.set_challenge_state(session["id"], "discipline", state)
+        updated = chat_store.advance_challenge(session["id"], "discipline")
+        assert len(updated["history"]) == 2
+        assert updated["history"][-1]["step"] == 2
+
+    def test_clear_challenge_removes_state(self, chat_store):
+        """Cleared node returns None."""
+        session = chat_store.create_session()
+        state = {"step": 2, "node_title": "Discipline", "node_type": "value", "permanence": "identity", "history": []}
+        chat_store.set_challenge_state(session["id"], "discipline", state)
+        ok = chat_store.clear_challenge(session["id"], "discipline")
+        assert ok is True
+        assert chat_store.get_challenge_state(session["id"], "discipline") is None
+
+    def test_get_active_challenges_returns_all(self, chat_store):
+        """Multiple active challenges returned."""
+        session = chat_store.create_session()
+        chat_store.set_challenge_state(session["id"], "discipline", {"step": 1, "node_title": "Discipline", "node_type": "value", "permanence": "identity", "history": []})
+        chat_store.set_challenge_state(session["id"], "honesty", {"step": 2, "node_title": "Honesty", "node_type": "belief", "permanence": "identity", "history": []})
+        challenges = chat_store.get_active_challenges(session["id"])
+        assert len(challenges) == 2
+        assert "discipline" in challenges
+        assert "honesty" in challenges
+
+    def test_challenge_state_backward_compat(self, chat_store):
+        """Session without challenge_state key works — returns empty dict / None."""
+        session = chat_store.create_session()
+        # Don't write any challenge_state; the key won't exist in JSON
+        assert chat_store.get_active_challenges(session["id"]) == {}
+        assert chat_store.get_challenge_state(session["id"], "anything") is None
+
+    def test_set_challenge_not_found(self, chat_store):
+        """set_challenge_state returns False for missing session."""
+        ok = chat_store.set_challenge_state("00000000-0000-0000-0000-000000000000", "node", {})
+        assert ok is False
+
+    def test_advance_challenge_no_session(self, chat_store):
+        """advance_challenge returns None for missing session."""
+        result = chat_store.advance_challenge("00000000-0000-0000-0000-000000000000", "node")
+        assert result is None
+
+    def test_advance_challenge_no_existing_challenge(self, chat_store):
+        """advance_challenge returns None if no challenge exists for node."""
+        session = chat_store.create_session()
+        result = chat_store.advance_challenge(session["id"], "nonexistent-node")
+        assert result is None
+
+    def test_clear_challenge_not_found(self, chat_store):
+        """clear_challenge returns False for missing session."""
+        ok = chat_store.clear_challenge("00000000-0000-0000-0000-000000000000", "node")
+        assert ok is False
