@@ -6,8 +6,11 @@ import logging
 
 import anthropic
 
-from mentor_agent import classify_mode
+from datetime import datetime, timezone
+
+from mentor_agent import classify_mode, _get_permanence
 from services.conflict_service import detect_conflicts
+from services.vault_service import _PERMANENCE_WARNINGS
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,9 @@ class ChatService:
             logger.exception("Mode classification failed — defaulting to mirror")
             mode = "mirror"
 
+        # Get active challenge state for system prompt injection
+        challenges = self.chat_store.get_active_challenges(session_id)
+
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
 
@@ -59,7 +65,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -76,9 +82,11 @@ class ChatService:
             logger.error("Network error reaching Claude API")
             return {"error": "Can't reach Claude right now. Check your connection.", "status": 503}
 
-        # Post-process: dedup check + supersession validation
+        # Post-process: dedup check + supersession validation + challenge ladder + permanence warnings
         graph_updates = self._dedup_check(result["graph_updates"])
         graph_updates = self._validate_supersession(graph_updates)
+        graph_updates = self._check_challenge_triggers(session_id, graph_updates)
+        graph_updates = self._annotate_permanence_warnings(graph_updates)
 
         # Save assistant message
         self.chat_store.append_message(session_id, {
@@ -119,17 +127,22 @@ class ChatService:
             logger.exception("Mode classification failed — defaulting to mirror")
             mode = "mirror"
 
+        # Get active challenge state for system prompt injection
+        challenges = self.chat_store.get_active_challenges(session_id)
+
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":
                     graph_updates = self._dedup_check(data["graph_updates"])
                     graph_updates = self._validate_supersession(graph_updates)
+                    graph_updates = self._check_challenge_triggers(session_id, graph_updates)
+                    graph_updates = self._annotate_permanence_warnings(graph_updates)
                     self.chat_store.append_message(session_id, {
                         "role": "assistant",
                         "content": data["full_response"],
@@ -347,6 +360,119 @@ class ChatService:
             enriched.append(update)
 
         return enriched
+
+    # Terminal statuses that trigger challenge when applied to identity nodes.
+    _TERMINAL_STATUSES = frozenset({"abandoned", "cancelled", "superseded"})
+    # Content fields on an update that can trigger the challenge.
+    _CONTENT_CHANGE_KEYS = frozenset({"content", "title", "priority"})
+
+    def _check_challenge_triggers(self, session_id: str, updates: list[dict]) -> list[dict]:
+        """Scan graph_updates for identity/fundamental-level changes. Activate challenge ladder.
+
+        Returns the updates list with:
+        - `_challenge` metadata injected on triggered updates
+        - steps 1-4: update removed from the returned list (held back)
+        - step 5: update returned normally (challenge cleared after)
+        """
+        released = []
+        for update in updates:
+            action = update.get("action", "")
+
+            # Only create/update actions can trigger the challenge.
+            if action == "create":
+                # Creating a new identity node is fine — do not challenge.
+                released.append(update)
+                continue
+
+            if action != "update":
+                released.append(update)
+                continue
+
+            node_id = update.get("node_id", "")
+            if not node_id:
+                released.append(update)
+                continue
+
+            # Determine node type: from update or existing node.
+            node_type = update.get("type", "")
+            if not node_type:
+                existing = self.graph.get_node(node_id)
+                if existing:
+                    node_type = existing.get("type", "")
+
+            level, _ = _get_permanence(node_type)
+            if level not in ("identity", "fundamental"):
+                released.append(update)
+                continue
+
+            # Check if this is a meaningful change.
+            changes = update.get("changes", {})
+            fm = changes.get("frontmatter", {})
+            status = fm.get("status", "").lower() if fm.get("status") else ""
+            triggers_challenge = (
+                status in self._TERMINAL_STATUSES
+                or bool(self._CONTENT_CHANGE_KEYS & set(changes.keys()))
+                or bool(self._CONTENT_CHANGE_KEYS & set(fm.keys()))
+            )
+
+            if not triggers_challenge:
+                released.append(update)
+                continue
+
+            # Get or advance challenge state.
+            existing_state = self.chat_store.get_challenge_state(session_id, node_id)
+            node_title = update.get("title", "")
+            if not node_title:
+                existing_node = self.graph.get_node(node_id)
+                if existing_node:
+                    node_title = existing_node.get("title", node_id)
+                else:
+                    node_title = node_id
+
+            if existing_state is None:
+                # Step 1 — create challenge.
+                state = {
+                    "step": 1,
+                    "node_title": node_title,
+                    "node_type": node_type,
+                    "permanence": level,
+                    "history": [{"step": 1, "action": "flagged", "timestamp": datetime.now(timezone.utc).isoformat()}],
+                }
+                self.chat_store.set_challenge_state(session_id, node_id, state)
+                current_step = 1
+            else:
+                # Advance to next step.
+                advanced = self.chat_store.advance_challenge(session_id, node_id)
+                current_step = advanced["step"] if advanced else existing_state["step"]
+                state = self.chat_store.get_challenge_state(session_id, node_id) or existing_state
+
+            update["_challenge"] = {
+                "step": current_step,
+                "node_title": node_title,
+                "permanence": level,
+            }
+
+            if current_step >= 5:
+                # Step 5 — release the update and clear challenge.
+                self.chat_store.clear_challenge(session_id, node_id)
+                released.append(update)
+            # Steps 1-4 — hold back the update (don't append to released).
+
+        return released
+
+    def _annotate_permanence_warnings(self, updates: list[dict]) -> list[dict]:
+        """Add permanence_warning field to updates targeting identity/fundamental nodes."""
+        for update in updates:
+            node_type = update.get("type", "")
+            if not node_type and update.get("node_id"):
+                existing = self.graph.get_node(update["node_id"])
+                if existing:
+                    node_type = existing.get("type", "")
+            level, _ = _get_permanence(node_type)
+            warning = _PERMANENCE_WARNINGS.get(level)
+            if warning:
+                update["permanence_warning"] = warning
+        return updates
 
     def _validate_supersession(self, updates: list[dict]) -> list[dict]:
         """If a batch contains a create + an update with status: superseded,

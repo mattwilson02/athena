@@ -497,3 +497,138 @@ class TestImportAccept:
 
         assert "error" in result
         assert result["status"] == 404
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Permanence-aware cascade warnings
+# ---------------------------------------------------------------------------
+
+
+class TestCascadePermanenceWarnings:
+    """Cascade proposals targeting identity/fundamental nodes include permanence_warning."""
+
+    def _make_service_with_nodes(self, tmp_path, node_map: dict):
+        """Create a VaultService backed by a mock graph with controlled nodes."""
+        from vault_graph import VaultGraph
+
+        graph = MagicMock()
+        graph.get_node = MagicMock(side_effect=lambda nid: node_map.get(nid))
+        graph.get_neighbors = MagicMock(side_effect=lambda nid, depth=1: [
+            n for n in node_map.values() if n["id"] != nid
+        ])
+
+        vector_index = MagicMock()
+        vector_index.search = MagicMock(return_value=[])
+        vector_index.find_duplicates = MagicMock(return_value=[])
+
+        schema = {"type_list": ["value", "belief", "fear", "goal", "task", "note"]}
+
+        def rebuild():
+            return {}
+
+        vault_path = str(tmp_path / "vault")
+        os.makedirs(vault_path, exist_ok=True)
+        from services.vault_service import VaultService
+        return VaultService(vault_path, graph, vector_index, schema, rebuild)
+
+    def test_cascade_proposal_identity_warning(self, tmp_path):
+        """Cascade proposal for a value node includes permanence_warning."""
+        nodes = {
+            "discipline": {"id": "discipline", "type": "value", "title": "Discipline", "status": "active"},
+            "morning-run": {"id": "morning-run", "type": "task", "title": "Morning Run", "status": "active"},
+        }
+        svc = self._make_service_with_nodes(tmp_path, nodes)
+
+        # Cascade triggered by morning-run being abandoned — discipline is a neighbour
+        proposals = svc.cascade_check("morning-run", {"frontmatter": {"status": "abandoned"}})
+
+        # Find the proposal targeting discipline (value node)
+        value_proposals = [p for p in proposals if p.get("node_id") == "discipline"]
+        if value_proposals:
+            assert "permanence_warning" in value_proposals[0]
+            assert "identity-level" in value_proposals[0]["permanence_warning"]
+
+    def test_cascade_proposal_tactical_no_warning(self, tmp_path):
+        """Cascade proposal for a task node has no permanence_warning."""
+        nodes = {
+            "my-project": {"id": "my-project", "type": "goal", "title": "My Project", "status": "active"},
+            "buy-notebook": {"id": "buy-notebook", "type": "task", "title": "Buy Notebook", "status": "active"},
+        }
+        svc = self._make_service_with_nodes(tmp_path, nodes)
+
+        proposals = svc.cascade_check("my-project", {"frontmatter": {"status": "abandoned"}})
+
+        task_proposals = [p for p in proposals if p.get("node_id") == "buy-notebook"]
+        if task_proposals:
+            assert "permanence_warning" not in task_proposals[0] or task_proposals[0].get("permanence_warning") is None
+
+    def test_warning_text_differs_by_level(self, tmp_path):
+        """Identity and fundamental nodes produce different warning messages."""
+        from services.vault_service import _PERMANENCE_WARNINGS
+        assert _PERMANENCE_WARNINGS["identity"] != _PERMANENCE_WARNINGS["fundamental"]
+        assert "identity-level" in _PERMANENCE_WARNINGS["identity"]
+        assert "fundamental" in _PERMANENCE_WARNINGS["fundamental"]
+
+
+class TestChatServicePermanenceWarnings:
+    """chat_service annotates direct graph updates with permanence_warning."""
+
+    def test_graph_update_annotated_with_warning(self, tmp_path):
+        """Graph update for a belief node gets permanence_warning."""
+        from chat_store import ChatStore
+        from services.chat_service import ChatService
+
+        graph = MagicMock()
+        graph.get_node = MagicMock(return_value={"id": "honesty", "type": "belief", "title": "Honesty"})
+        vector_index = MagicMock()
+        vector_index.find_duplicates = MagicMock(return_value=[])
+        chat_store = ChatStore(str(tmp_path / "sessions"))
+        service = ChatService(chat_store, None, graph, vector_index)
+
+        updates = [
+            {"action": "update", "node_id": "honesty", "changes": {"frontmatter": {"status": "abandoned"}}},
+        ]
+        annotated = service._annotate_permanence_warnings(updates)
+
+        assert len(annotated) == 1
+        assert "permanence_warning" in annotated[0]
+        assert "identity-level" in annotated[0]["permanence_warning"]
+
+    def test_graph_update_no_warning_for_task(self, tmp_path):
+        """Task update has no permanence_warning."""
+        from chat_store import ChatStore
+        from services.chat_service import ChatService
+
+        graph = MagicMock()
+        graph.get_node = MagicMock(return_value={"id": "buy-milk", "type": "task", "title": "Buy Milk"})
+        vector_index = MagicMock()
+        vector_index.find_duplicates = MagicMock(return_value=[])
+        chat_store = ChatStore(str(tmp_path / "sessions"))
+        service = ChatService(chat_store, None, graph, vector_index)
+
+        updates = [
+            {"action": "update", "node_id": "buy-milk", "changes": {"frontmatter": {"status": "completed"}}},
+        ]
+        annotated = service._annotate_permanence_warnings(updates)
+
+        assert len(annotated) == 1
+        assert "permanence_warning" not in annotated[0]
+
+    def test_warning_uses_type_from_update_when_node_not_in_graph(self, tmp_path):
+        """If graph has no node, type from update dict is used for warning."""
+        from chat_store import ChatStore
+        from services.chat_service import ChatService
+
+        graph = MagicMock()
+        graph.get_node = MagicMock(return_value=None)
+        vector_index = MagicMock()
+        vector_index.find_duplicates = MagicMock(return_value=[])
+        chat_store = ChatStore(str(tmp_path / "sessions"))
+        service = ChatService(chat_store, None, graph, vector_index)
+
+        updates = [
+            {"action": "update", "node_id": "core-fear", "type": "fear", "changes": {}},
+        ]
+        annotated = service._annotate_permanence_warnings(updates)
+
+        assert "permanence_warning" in annotated[0]

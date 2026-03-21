@@ -76,6 +76,10 @@
   }
 
   let hasDuplicate = $derived(update._duplicate && update._duplicate.match !== 'none');
+  let hasPermanenceWarning = $derived(!!update.permanence_warning);
+  let hasChallenge = $derived(!!update._challenge);
+  let challengeStep = $derived(update._challenge?.step ?? 0);
+  let challengeBlocked = $derived(hasChallenge && challengeStep < 5);
   let hasLongContent = $derived(update.content && update.content.length > CONTENT_PREVIEW_LENGTH);
   let displayContent = $derived(
     hasLongContent && !contentExpanded
@@ -359,13 +363,31 @@
         </div>
       {/if}
 
+      {#if hasPermanenceWarning && status === 'pending'}
+        <div class="permanence-warning">
+          <span class="permanence-icon">\u26a0\ufe0f</span>
+          {update.permanence_warning}
+        </div>
+      {/if}
+
+      {#if hasChallenge && status === 'pending'}
+        <div class="challenge-indicator" class:challenge-blocked={challengeBlocked}>
+          <span class="challenge-step">Step {challengeStep}/5</span>
+          {#if challengeBlocked}
+            This change requires further discussion before it can be accepted.
+          {:else}
+            Change earned — ready to accept.
+          {/if}
+        </div>
+      {/if}
+
       {#if status === 'pending'}
         <div class="card-actions">
           {#if hasDuplicate}
             <button class="btn-merge" onclick={mergeIntoExisting}>Merge</button>
-            <button class="btn-accept" onclick={accept}>Create New</button>
+            <button class="btn-accept" onclick={accept} disabled={challengeBlocked}>Create New</button>
           {:else}
-            <button class="btn-accept" onclick={accept}>Accept</button>
+            <button class="btn-accept" onclick={accept} disabled={challengeBlocked}>Accept</button>
           {/if}
           <button class="btn-dismiss" onclick={dismiss}>Dismiss</button>
         </div>
@@ -741,6 +763,71 @@
     border-radius: 6px;
     padding: 6px 10px;
     margin-bottom: var(--space-sm);
+  }
+
+  /* ── Permanence warning ── */
+
+  .permanence-warning {
+    font-size: var(--text-sm);
+    color: #92400e;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin-bottom: var(--space-sm);
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    line-height: 1.4;
+  }
+
+  .permanence-icon {
+    flex-shrink: 0;
+    font-style: normal;
+  }
+
+  /* ── Challenge indicator ── */
+
+  .challenge-indicator {
+    font-size: var(--text-sm);
+    color: #b45309;
+    background: rgba(251, 191, 36, 0.1);
+    border: 1px solid rgba(251, 191, 36, 0.25);
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin-bottom: var(--space-sm);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .challenge-indicator.challenge-blocked {
+    color: #92400e;
+    background: rgba(245, 158, 11, 0.08);
+    border-color: rgba(245, 158, 11, 0.2);
+  }
+
+  .challenge-step {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(245, 158, 11, 0.2);
+    color: #92400e;
+    flex-shrink: 0;
+  }
+
+  .btn-accept:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .btn-accept:disabled:hover {
+    background: var(--success);
+    transform: none;
   }
 
   /* ── Actions ── */
