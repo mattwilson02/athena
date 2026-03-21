@@ -55,6 +55,82 @@ _STATUS_PENALTIES: dict[str, float] = {
     "parked": -0.10,
 }
 
+# Permanence levels — type-level defaults for retrieval boosting.
+# Higher-permanence nodes get a score boost to ensure identity/values stay in context.
+_PERMANENCE_DEFAULTS: dict[str, tuple[str, float]] = {
+    # identity (+0.15)
+    "value":        ("identity",  0.15),
+    "belief":       ("identity",  0.15),
+    "fear":         ("identity",  0.15),
+    # strategic (+0.10)
+    "goal":         ("strategic", 0.10),
+    "habit":        ("strategic", 0.10),
+    "skill":        ("strategic", 0.10),
+    "project":      ("strategic", 0.10),
+    # tactical (+0.00) — listed explicitly for completeness
+    "task":         ("tactical",  0.00),
+    "reminder":     ("tactical",  0.00),
+    "event":        ("tactical",  0.00),
+    "expense":      ("tactical",  0.00),
+    "subscription": ("tactical",  0.00),
+    "budget":       ("tactical",  0.00),
+    # ephemeral (-0.05)
+    "daily":        ("ephemeral", -0.05),
+    "note":         ("ephemeral", -0.05),
+}
+
+
+def _get_permanence(node_type: str) -> tuple[str, float]:
+    """Return (level_name, boost) for a node type. Unlisted types default to tactical."""
+    return _PERMANENCE_DEFAULTS.get(node_type, ("tactical", 0.00))
+
+
+# ── Mode classifier ──
+
+_MODE_DIALECTIC_SIGNALS: list[str] = [
+    "should i", "what if", "considering", "torn between",
+    "not sure if i should", "debating whether", "thinking about quitting",
+    "thinking about leaving", "worth it to",
+]
+
+_MODE_ADVISOR_SIGNALS: list[str] = [
+    "i want to start", "i'm going to", "im going to", "planning to",
+    "thinking about starting", "sign up for", "commit to",
+    "take on", "new project", "new goal", "new habit",
+]
+
+
+def classify_mode(message: str, conflicts: list[dict] | None) -> str:
+    """Classify the incoming message into a communication mode.
+
+    Priority order: guardian > dialectic > advisor > mirror (default).
+
+    Returns one of: "mirror", "advisor", "guardian", "dialectic".
+    """
+    if not message:
+        return "mirror"
+
+    msg_lower = message.lower()
+    conflicts = conflicts or []
+
+    # 1. Guardian — only when hard conflicts are detected
+    if any(c.get("severity") == "hard" for c in conflicts):
+        return "guardian"
+
+    # 2. Dialectic — big-decision signals
+    if any(signal in msg_lower for signal in _MODE_DIALECTIC_SIGNALS):
+        return "dialectic"
+
+    # 3. Advisor — new commitment signals OR soft-only conflicts
+    if any(signal in msg_lower for signal in _MODE_ADVISOR_SIGNALS):
+        return "advisor"
+    if conflicts and all(c.get("severity") == "soft" for c in conflicts):
+        return "advisor"
+
+    # 4. Mirror — default
+    return "mirror"
+
+
 # Bootstrap threshold — below this, inject onboarding prompt instead of retrieval.
 _BOOTSTRAP_THRESHOLD = 10
 
@@ -66,10 +142,11 @@ _CHARS_PER_TOKEN = 4  # conservative estimate
 # ── Soul loader ──
 
 
-def _load_soul(vault_path: str | None = None) -> tuple[str, str]:
-    """Load Athena's identity and instructions from SOUL.md.
+def _load_soul(vault_path: str | None = None) -> tuple[str, str, dict[str, str]]:
+    """Load Athena's identity, instructions, and mode texts from SOUL.md.
 
-    Parses the markdown sections into an identity block and an instructions block.
+    Parses the markdown sections into an identity block, an instructions block,
+    and a dict of mode-specific instruction texts keyed by mode name.
     Falls back to minimal defaults if the file is missing.
     """
     # Look for SOUL.md in the project root (one level up from backend/) or same dir
@@ -91,6 +168,7 @@ def _load_soul(vault_path: str | None = None) -> tuple[str, str]:
         return (
             "You are Athena, a personal AI assistant for a knowledge graph.\n\nCONTEXT FROM KNOWLEDGE GRAPH:\n{context}",
             "INSTRUCTIONS:\n- Be concise and reference nodes by name.\n- Propose graph updates when the user shares information worth capturing.",
+            {},
         )
 
     with open(soul_path, "r", encoding="utf-8") as f:
@@ -147,8 +225,25 @@ def _load_soul(vault_path: str | None = None) -> tuple[str, str]:
 
     instructions = "\n".join(instruction_parts)
 
-    logger.info(f"Soul loaded from {soul_path} ({len(sections)} sections)")
-    return identity, instructions
+    # Parse mode subsections from the ## Modes section
+    mode_instructions: dict[str, str] = {}
+    modes_text = sections.get("modes", "")
+    if modes_text:
+        current_mode: str | None = None
+        mode_lines: list[str] = []
+        for line in modes_text.split("\n"):
+            if line.startswith("### "):
+                if current_mode:
+                    mode_instructions[current_mode] = "\n".join(mode_lines).strip()
+                current_mode = line[4:].strip().lower()
+                mode_lines = []
+            elif current_mode is not None:
+                mode_lines.append(line)
+        if current_mode:
+            mode_instructions[current_mode] = "\n".join(mode_lines).strip()
+
+    logger.info(f"Soul loaded from {soul_path} ({len(sections)} sections, {len(mode_instructions)} modes)")
+    return identity, instructions, mode_instructions
 
 def load_insights_prompt(vault_path: str | None = None) -> str:
     """Load the insights system prompt from SOUL.md.
@@ -344,19 +439,24 @@ Wrap graph updates in <graph_updates> tags after your response text:
 </graph_updates>"""
 
 
-def build_system_prompt(schema: dict, vault_path: str | None = None) -> str:
-    """Assemble the full system prompt from SOUL.md + parsed schema."""
-    identity, instructions = _load_soul(vault_path)
+def build_system_prompt(schema: dict, vault_path: str | None = None) -> tuple[str, dict[str, str]]:
+    """Assemble the base system prompt from SOUL.md + parsed schema.
+
+    Returns (prompt_template, mode_instructions_dict).
+    The prompt_template has {context} and {today} placeholders.
+    """
+    identity, instructions, mode_instructions = _load_soul(vault_path)
     type_rules = generate_type_rules(schema)
     type_enum = "|".join(schema["type_list"])
     graph_instructions = _GRAPH_INSTRUCTIONS.replace("{type_enum}", type_enum)
 
-    return "\n\n".join([
+    prompt = "\n\n".join([
         identity,
         instructions,
         type_rules,
         graph_instructions,
     ])
+    return prompt, mode_instructions
 
 
 GRAPH_UPDATES_RE = re.compile(r"<graph_updates>\s*(.*?)\s*</graph_updates>", re.DOTALL)
@@ -678,7 +778,7 @@ class MentorAgent:
         self.graph = graph
         self.vector_index = vector_index
         self.schema = schema
-        self.system_prompt_template = build_system_prompt(schema, vault_path)
+        self.system_prompt_template, self.mode_instructions = build_system_prompt(schema, vault_path)
         self.client = client or anthropic.Anthropic()
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
         logger.info(f"System prompt built from schema ({len(self.system_prompt_template)} chars)")
@@ -772,7 +872,10 @@ class MentorAgent:
                 node_status = str(node_data.get("status", "") if node_data else "").lower()
             status_penalty = _STATUS_PENALTIES.get(node_status, 0.0)
 
-            total = semantic_score + domain_boost + recency_boost + centrality_boost + temporal_boost + s_boost + status_penalty
+            # Permanence boost — identity/strategic nodes outrank ephemeral ones
+            _, permanence_boost = _get_permanence(node_type)
+
+            total = semantic_score + domain_boost + recency_boost + centrality_boost + temporal_boost + s_boost + status_penalty + permanence_boost
             scored.append((total, result))
 
         # Inject temporal nodes not already in semantic results
@@ -782,7 +885,8 @@ class MentorAgent:
                 node = self.graph.get_node(nid)
                 if node:
                     node_status = str(node.get("status", "") or "").lower()
-                    injection_score = 0.3 + _STATUS_PENALTIES.get(node_status, 0.0)
+                    _, perm_boost = _get_permanence(node.get("type", ""))
+                    injection_score = 0.3 + _STATUS_PENALTIES.get(node_status, 0.0) + perm_boost
                     scored.append((injection_score, {
                         "id": nid,
                         "title": node.get("title", nid),
@@ -929,6 +1033,15 @@ class MentorAgent:
         )
         return context, top_results
 
+    def _build_mode_note(self, mode: str) -> str:
+        """Build the ACTIVE MODE injection for the system prompt."""
+        if not mode:
+            return ""
+        instructions = self.mode_instructions.get(mode, "")
+        if instructions:
+            return f"\n\nACTIVE MODE: {mode}\n{instructions}"
+        return f"\n\nACTIVE MODE: {mode}"
+
     def _build_dismissed_note(self, dismissed_ids: list[str]) -> str:
         """Build a system prompt note about dismissed proposals."""
         if not dismissed_ids:
@@ -953,7 +1066,8 @@ class MentorAgent:
 
         for c in regular:
             severity = c.get("severity", "soft").upper()
-            lines.append(f"- [{severity}] {c['conflict_type']}: {c.get('explanation', '')} (node: {c.get('title', c.get('node_id', '?'))})")
+            permanence = c.get("permanence", "tactical")
+            lines.append(f"- [{severity} | {permanence}] {c['conflict_type']}: {c.get('explanation', '')} (node: {c.get('title', c.get('node_id', '?'))})")
         conflict_text = "\n".join(lines)
         result = ""
         if conflict_text:
@@ -984,7 +1098,8 @@ class MentorAgent:
 
     def chat_stream(self, message: str, conversation_history: list[dict],
                     dismissed_ids: list[str] | None = None,
-                    conflicts: list[dict] | None = None):
+                    conflicts: list[dict] | None = None,
+                    mode: str = "mirror"):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -996,6 +1111,7 @@ class MentorAgent:
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
         system += self._build_conflict_note(conflicts or [])
+        system += self._build_mode_note(mode)
         messages = conversation_history + [{"role": "user", "content": message}]
 
         full_text = ""
@@ -1069,18 +1185,21 @@ class MentorAgent:
 
     def chat(self, message: str, conversation_history: list[dict],
              dismissed_ids: list[str] | None = None,
-             conflicts: list[dict] | None = None) -> dict:
+             conflicts: list[dict] | None = None,
+             mode: str = "mirror") -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
         dismissed_ids: node IDs the user dismissed this session — injected into prompt.
         conflicts: detected conflicts between the message and existing graph nodes.
+        mode: communication mode (mirror/advisor/guardian/dialectic).
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
         system += self._build_conflict_note(conflicts or [])
+        system += self._build_mode_note(mode)
 
         # Build messages: prior history + current user message
         messages = conversation_history + [{"role": "user", "content": message}]

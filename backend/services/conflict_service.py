@@ -6,6 +6,8 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
+from mentor_agent import _get_permanence
+
 logger = logging.getLogger(__name__)
 
 # Statuses that indicate a node is no longer active — skip these.
@@ -139,10 +141,13 @@ def detect_conflicts(
             continue
 
         seen_ids.add(nid)
+        node_type = node.get("type", "unknown")
+        permanence_level, _ = _get_permanence(node_type)
         conflicts.append({
             "node_id": nid,
             "title": node.get("title", nid),
-            "type": node.get("type", "unknown"),
+            "type": node_type,
+            "permanence": permanence_level,
             **result,
         })
 
@@ -165,6 +170,7 @@ def detect_conflicts(
                 "node_id": "__obligations__",
                 "title": "Active Obligations",
                 "type": "meta",
+                "permanence": "tactical",
                 "conflict_type": "commitment_overload",
                 "severity": "soft",
                 "explanation": f"You already have {summary}. Where does this fit?",
