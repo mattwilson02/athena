@@ -13,6 +13,7 @@
     schema = null,
     graphFilter = null,
     onFilterChange = () => {},
+    onCreateNode = () => {},
   } = $props();
 
   let stats = $state(null);
@@ -212,10 +213,13 @@
   {/if}
 
   <div class="stats-section">
-    <button class="stats-toggle" onclick={() => statsCollapsed = !statsCollapsed}>
-      <h4>Graph</h4>
-      <span class="toggle-arrow" class:open={!statsCollapsed}></span>
-    </button>
+    <div class="stats-header">
+      <button class="stats-toggle" onclick={() => statsCollapsed = !statsCollapsed}>
+        <h4>Graph</h4>
+        <span class="toggle-arrow" class:open={!statsCollapsed}></span>
+      </button>
+      <button class="btn-new" onclick={onCreateNode} title="Create node">+</button>
+    </div>
 
     {#if !statsCollapsed}
       {#if stats}
@@ -424,7 +428,14 @@
     flex-direction: column;
   }
 
+  .stats-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+
   .stats-toggle {
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;

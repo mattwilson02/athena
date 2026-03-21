@@ -147,6 +147,10 @@ export function updateNode(nodeId, changes) {
   });
 }
 
+export function deleteNode(nodeId) {
+  return fetchJSON(`${BASE}/vault/node/${encodeURIComponent(nodeId)}`, { method: 'DELETE' });
+}
+
 export function rebuildVault() {
   return fetchJSON(`${BASE}/vault/rebuild`, { method: 'POST' });
 }
