@@ -187,6 +187,25 @@ def get_accountability():
     })
 
 
+@graph_bp.route("/api/debug/retrieval", methods=["GET"])
+def debug_retrieval():
+    """Return full retrieval diagnostic for a query — intent, scores, tier breakdown."""
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"error": "Missing query parameter 'q'"}), 400
+
+    mentor = current_app.config.get("mentor")
+    if mentor is None:
+        return jsonify({"error": "Mentor service not configured"}), 503
+
+    try:
+        result = mentor.get_context_debug(query)
+        return jsonify(result)
+    except Exception as exc:
+        logger.exception("Retrieval debug error")
+        return jsonify({"error": f"Retrieval failed: {exc}"}), 500
+
+
 @graph_bp.route("/api/graph/suggest-links", methods=["POST"])
 def suggest_links():
     data = request.json or {}

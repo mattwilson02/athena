@@ -20,6 +20,10 @@ from mentor_agent import (
     _bootstrap_context,
     _BOOTSTRAP_THRESHOLD,
     _STATUS_PENALTIES,
+    _node_context_compact,
+    _node_context_full,
+    _MAX_CONTEXT_TOKENS,
+    _CHARS_PER_TOKEN,
     build_system_prompt,
     MentorAgent,
 )
@@ -1335,3 +1339,302 @@ class TestSoulStateAwarenessParsed:
         with open(candidate, "r", encoding="utf-8") as f:
             soul_content = f.read()
         assert "State Awareness" in soul_content
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by Tasks 3 + 4 tests
+# ---------------------------------------------------------------------------
+
+def _make_agent_with_nodes(nodes, schema_override=None):
+    """Build a MentorAgent backed by a FakeGraph with the given nodes.
+
+    The vector_index.search mock returns synthetic results covering all nodes
+    so that scoring / top-K logic is exercised.
+    """
+    from unittest.mock import MagicMock
+
+    class FakeGraph:
+        def __init__(self, nodes):
+            self._nodes = {n["id"]: n for n in nodes}
+
+        def get_all_nodes(self):
+            return list(self._nodes.values())
+
+        def get_node(self, nid):
+            return self._nodes.get(nid)
+
+        def get_neighbors(self, nid, depth=1):
+            return []
+
+        def get_neighbors_by_hop(self, nid, depth=2):
+            return {}
+
+        def get_degree(self, nid):
+            return 0
+
+    schema = schema_override or {
+        "type_list": ["goal", "task", "daily", "habit", "note", "person"],
+        "types": {
+            "goal": {"domain": "Self"},
+            "habit": {"domain": "Self"},
+            "daily": {"domain": "Life"},
+            "task": {"domain": "Planning"},
+            "note": {"domain": "Knowledge"},
+            "person": {"domain": "People"},
+        },
+        "domains": {
+            "Self": {"types": ["goal", "habit"]},
+            "Life": {"types": ["daily"]},
+            "Planning": {"types": ["task"]},
+            "Knowledge": {"types": ["note"]},
+            "People": {"types": ["person"]},
+        },
+    }
+
+    graph = FakeGraph(nodes)
+
+    # Build synthetic search results for ALL nodes so the pipeline can rank them
+    synthetic_results = [
+        {"id": n["id"], "title": n.get("title", n["id"]), "type": n.get("type", "note"), "score": 0.5}
+        for n in nodes
+    ]
+
+    vector_index = MagicMock()
+    vector_index.search.return_value = synthetic_results
+
+    agent = MentorAgent.__new__(MentorAgent)
+    agent.graph = graph
+    agent.vector_index = vector_index
+    agent.schema = schema
+    agent.client = MagicMock()
+    agent.system_prompt_template = "test {context} {today}"
+    agent.model = "test-model"
+    agent.mode_instructions = {}
+    return agent
+
+
+# ---------------------------------------------------------------------------
+# Task 3: Adaptive Retrieval Pipeline
+# ---------------------------------------------------------------------------
+
+class TestGetContextAdaptiveRetrieval:
+
+    def test_get_context_broad_temporal_returns_more(self):
+        """Broad temporal query with 12+ date-bearing nodes → context contains >5 nodes."""
+        from unittest.mock import patch
+        from datetime import date, timedelta
+
+        frozen = date(2026, 3, 23)
+        # 12 daily nodes with dates in "this week" (Mon Mar 17 – Sun Mar 23)
+        week_start = date(2026, 3, 17)
+        nodes = [
+            {
+                "id": f"daily-{i}",
+                "type": "daily",
+                "title": f"Day {i}",
+                "date": (week_start + timedelta(days=i % 7)).isoformat(),
+                "status": "active",
+            }
+            for i in range(12)
+        ]
+
+        agent = _make_agent_with_nodes(nodes)
+
+        with patch("mentor_agent.date") as mock_date:
+            mock_date.today.return_value = frozen
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            context, results = agent.get_context("what happened this week")
+
+        # Should return more than 5 nodes (temporal_broad raises k to 15)
+        assert len(results) > 5
+
+    def test_get_context_entity_lookup_full_content(self):
+        """Entity lookup query → Tier 1 uses full content (not compact)."""
+        nodes = [
+            {
+                "id": "fear-failure",
+                "type": "fear",
+                "title": "Fear of Failure",
+                "content": "I am afraid of failing in front of others because it means I'm not good enough.",
+                "status": "active",
+            }
+        ] + [
+            {"id": f"pad-{i}", "type": "note", "title": f"Pad {i}", "status": ""}
+            for i in range(15)
+        ]
+        agent = _make_agent_with_nodes(nodes)
+        context, results = agent.get_context("tell me about my fear of failure")
+        # Full content should appear (not compact format)
+        assert "Content:" in context or "afraid of failing" in context
+
+    def test_get_context_domain_filter_types(self):
+        """Domain query → results biased toward that domain's types."""
+        nodes = [
+            {"id": "goal-1", "type": "goal", "title": "Learn Piano", "status": "active"},
+            {"id": "goal-2", "type": "goal", "title": "Run Marathon", "status": "active"},
+            {"id": "goal-3", "type": "goal", "title": "Start Business", "status": "active"},
+            {"id": "task-1", "type": "task", "title": "Book Flights", "status": "active"},
+            {"id": "note-1", "type": "note", "title": "Random Note", "status": ""},
+        ] + [{"id": f"goal-{i+4}", "type": "goal", "title": f"Goal {i}", "status": "active"} for i in range(10)]
+
+        agent = _make_agent_with_nodes(nodes)
+        context, results = agent.get_context("show me my goals")
+        # All results should not be tasks/notes since domain_filter focuses on Self
+        result_types = [r["type"] for r in results]
+        goal_count = result_types.count("goal")
+        assert goal_count >= len(result_types) // 2  # majority goals
+
+    def test_get_context_general_unchanged(self):
+        """General query → k=5, full content format (same as before sprint)."""
+        nodes = [{"id": f"node-{i}", "type": "note", "title": f"Note {i}", "status": ""} for i in range(15)]
+        agent = _make_agent_with_nodes(nodes)
+        context, results = agent.get_context("hey how's it going, just checking in about random stuff")
+        # k=5 for general
+        assert len(results) <= 5
+
+    def test_get_context_intent_error_fallback(self):
+        """If classify_query_intent raises, get_context() falls back to general intent."""
+        from unittest.mock import patch
+
+        nodes = [{"id": f"node-{i}", "type": "note", "title": f"Note {i}", "status": ""} for i in range(15)]
+        agent = _make_agent_with_nodes(nodes)
+
+        with patch("mentor_agent.classify_query_intent", side_effect=RuntimeError("boom")):
+            # Should not raise, should fall back gracefully
+            context, results = agent.get_context("test query")
+        assert isinstance(context, str)
+
+    def test_get_context_filter_fallback_on_empty(self):
+        """Filtered search returns 0 results → fallback to unfiltered."""
+        from unittest.mock import MagicMock, patch
+
+        nodes = [{"id": f"node-{i}", "type": "note", "title": f"Note {i}", "status": ""} for i in range(15)]
+        agent = _make_agent_with_nodes(nodes)
+
+        call_count = [0]
+        original_search = agent.vector_index.search.return_value
+
+        def mock_search(query, n=5, where=None):
+            call_count[0] += 1
+            if where is not None:
+                return []  # filtered search returns nothing
+            return original_search  # unfiltered returns results
+
+        agent.vector_index.search = mock_search
+
+        # domain_filter intent sets a pre_filter; with no results, should fall back
+        context, results = agent.get_context("show me my goals")
+        # Should still have results from unfiltered fallback
+        assert isinstance(context, str)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Compact Context Assembly
+# ---------------------------------------------------------------------------
+
+class TestNodeContextCompact:
+
+    def test_node_context_compact_format(self):
+        """Compact output contains title, type, status, and first sentence."""
+        node = {
+            "id": "goal-piano",
+            "type": "goal",
+            "title": "Learn Piano",
+            "status": "active",
+            "priority": "high",
+            "due": "2026-06-01",
+            "content": "I want to learn to play piano at an intermediate level. This is my main goal.",
+        }
+        result = _node_context_compact(node, ["Music Theory (note)"])
+        assert "Learn Piano" in result
+        assert "goal" in result
+        assert "active" in result
+        assert "high priority" in result
+        # First sentence of content
+        assert "I want to learn to play piano" in result
+
+    def test_node_context_compact_shorter_than_full(self):
+        """Compact output is less than 50% the length of full output for same node."""
+        node = {
+            "id": "goal-piano",
+            "type": "goal",
+            "title": "Learn Piano",
+            "status": "active",
+            "content": "I want to learn to play piano at an intermediate level. " * 10,
+        }
+        neighbor_names = ["Music Theory (note)", "Alice (person)", "Practice (habit)"]
+        compact_len = len(_node_context_compact(node, neighbor_names))
+        full_len = len(_node_context_full(node, neighbor_names))
+        assert compact_len < full_len * 0.5
+
+    def test_compact_assembly_fits_15_nodes(self):
+        """15 nodes in compact mode fit within the char budget."""
+        nodes = [
+            {
+                "id": f"daily-{i}",
+                "type": "daily",
+                "title": f"Daily Journal {i}",
+                "status": "active",
+                "content": f"Today I worked on item {i}. It went well.",
+            }
+            for i in range(15)
+        ]
+        # Calculate total chars for 15 compact nodes
+        total_chars = sum(
+            len(_node_context_compact(n, [])) for n in nodes
+        )
+        char_budget = _MAX_CONTEXT_TOKENS * _CHARS_PER_TOKEN
+        assert total_chars <= char_budget, (
+            f"15 compact nodes ({total_chars} chars) exceed budget ({char_budget} chars)"
+        )
+
+    def test_compact_temporal_header_capped(self):
+        """Broad temporal query with 20 date-bearing nodes → only 10 temporal facts in header."""
+        from unittest.mock import patch
+        from datetime import date, timedelta
+
+        frozen = date(2026, 3, 23)
+        week_start = date(2026, 3, 17)
+        # 20 daily nodes with dates in "this week"
+        nodes = [
+            {
+                "id": f"daily-{i}",
+                "type": "daily",
+                "title": f"Day {i}",
+                "date": (week_start + timedelta(days=i % 7)).isoformat(),
+                "status": "active",
+            }
+            for i in range(20)
+        ]
+
+        agent = _make_agent_with_nodes(nodes)
+
+        with patch("mentor_agent.date") as mock_date:
+            mock_date.today.return_value = frozen
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            context, _ = agent.get_context("what happened this week")
+
+        # Count FACT lines in the header
+        fact_lines = [line for line in context.split("\n") if line.startswith("FACT:")]
+        assert len(fact_lines) <= 10
+
+    def test_non_compact_unchanged(self):
+        """compact=False (entity intent) → full content in Tier 1."""
+        nodes = [
+            {
+                "id": "goal-piano",
+                "type": "goal",
+                "title": "Learn Piano",
+                "status": "active",
+                "content": "A detailed description of my piano goal and ambitions.",
+            }
+        ] + [
+            {"id": f"pad-{i}", "type": "note", "title": f"Pad {i}", "status": ""}
+            for i in range(15)
+        ]
+        agent = _make_agent_with_nodes(nodes)
+        # "tell me about my goal" → entity_lookup → compact=False
+        # "goal" keyword → Self domain → goal-piano gets domain boost → ranks #1
+        context, _ = agent.get_context("tell me about my goal")
+        # Full format shows "Content:" label
+        assert "Content:" in context

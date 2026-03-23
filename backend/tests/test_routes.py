@@ -732,3 +732,36 @@ class TestAccountabilityFundamentals:
             assert resp.status_code == 500
             data = resp.get_json()
             assert "error" in data
+
+
+# ── Debug Retrieval Route ────────────────────────────────────────────────
+
+
+class TestDebugRetrievalRoute:
+
+    def test_debug_retrieval_endpoint_exists(self, client, app):
+        """GET /api/debug/retrieval?q=test → 200 response with diagnostics."""
+        mentor = app.config["mentor"]
+        mentor.get_context_debug = MagicMock(return_value={
+            "query": "test",
+            "intent": {"intent": "general", "k": 5, "compact": False, "pre_filter": None, "scoring_adjustments": {}},
+            "date_range": None,
+            "domains": [],
+            "candidates": [],
+            "context_length_chars": 100,
+            "context_length_tokens_est": 25,
+            "nodes_in_context": {"tier1": 0, "tier2": 0, "tier3": 0},
+        })
+        resp = client.get("/api/debug/retrieval?q=test")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "query" in data
+        assert "intent" in data
+        assert "candidates" in data
+
+    def test_debug_retrieval_endpoint_no_query(self, client):
+        """GET /api/debug/retrieval (no q param) → 400 response."""
+        resp = client.get("/api/debug/retrieval")
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert "error" in data

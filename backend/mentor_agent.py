@@ -13,7 +13,7 @@ import anthropic
 
 from schema_parser import generate_type_rules
 from vault_graph import VaultGraph
-from vector_search import VectorIndex
+from vector_search import VectorIndex, build_search_filter
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,146 @@ def classify_mode(message: str, conflicts: list[dict] | None) -> str:
 
     # 4. Mirror — default
     return "mirror"
+
+
+# ── Query intent classifier ──
+
+_INTENT_BROAD_SIGNALS: list[str] = [
+    "summary", "recap", "review", "overview",
+    "what happened", "what did i do", "how did", "how was",
+]
+
+_INTENT_FILTER_SIGNALS: list[str] = [
+    "show me my", "list my", "what are my", "all my tasks", "my expenses",
+]
+
+_INTENT_ENTITY_SIGNALS: list[str] = [
+    "tell me about", "what is", "who is", "details on", "more about",
+]
+
+
+def classify_query_intent(
+    query: str,
+    date_range: tuple[date, date] | None,
+    domains: list[str],
+) -> dict:
+    """Classify incoming query into an intent category for adaptive retrieval.
+
+    Evaluated in priority order:
+      1. temporal_broad — date range ≥3 days, or summary signal phrases
+      2. temporal_specific — date range <3 days (today/tomorrow/single day)
+      3. domain_filter — strong domain signal or explicit filter phrases
+      4. entity_lookup — short query or entity phrases ("tell me about …")
+      5. general — default
+
+    Returns a dict with: intent, k, compact, pre_filter, scoring_adjustments.
+    The pre_filter for domain_filter is ``None`` here; ``get_context()`` builds
+    the actual type-level filter from the schema once the intent is known.
+    """
+    q = query.lower().strip()
+
+    if not q:
+        return {
+            "intent": "general",
+            "k": 5,
+            "compact": False,
+            "pre_filter": None,
+            "scoring_adjustments": {},
+        }
+
+    has_broad_signal = any(sig in q for sig in _INTENT_BROAD_SIGNALS)
+    has_filter_signal = any(sig in q for sig in _INTENT_FILTER_SIGNALS)
+    has_entity_signal = any(sig in q for sig in _INTENT_ENTITY_SIGNALS)
+
+    # Domain dominance check — re-score to get raw hit counts
+    domain_hits: dict[str, int] = {}
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        hits = sum(1 for kw in keywords if kw in q)
+        if hits > 0:
+            domain_hits[domain] = hits
+
+    sorted_hit_domains = sorted(domain_hits, key=domain_hits.get, reverse=True)
+    top_domain = sorted_hit_domains[0] if sorted_hit_domains else None
+    is_domain_dominant = False
+    if top_domain:
+        top_score = domain_hits[top_domain]
+        second_score = domain_hits.get(sorted_hit_domains[1], 0) if len(sorted_hit_domains) > 1 else 0
+        is_domain_dominant = top_score >= 3 and top_score >= 2 * max(second_score, 1)
+
+    # ── 1. temporal_broad ──
+    if date_range is not None and (date_range[1] - date_range[0]).days >= 3:
+        return {
+            "intent": "temporal_broad",
+            "k": 15,
+            "compact": True,
+            "pre_filter": build_search_filter(
+                exclude_statuses=["completed", "cancelled", "archived", "superseded"]
+            ),
+            "scoring_adjustments": {
+                "temporal_boost": 0.5,
+                "permanence_multiplier": 0.5,
+            },
+        }
+    # Summary signals without a date range → temporal_broad with lower k
+    if has_broad_signal:
+        return {
+            "intent": "temporal_broad",
+            "k": 10,
+            "compact": True,
+            "pre_filter": None,
+            "scoring_adjustments": {
+                "temporal_boost": 0.5,
+                "permanence_multiplier": 0.5,
+            },
+        }
+
+    # ── 2. temporal_specific ──
+    if date_range is not None:
+        return {
+            "intent": "temporal_specific",
+            "k": 10,
+            "compact": False,
+            "pre_filter": None,
+            "scoring_adjustments": {
+                "temporal_boost": 0.4,
+                "recency_multiplier": 2.0,
+            },
+        }
+
+    # ── 3. domain_filter ──
+    if (has_filter_signal and domains) or is_domain_dominant:
+        return {
+            "intent": "domain_filter",
+            "k": 10,
+            "compact": True,
+            "pre_filter": None,  # caller fills this in from schema
+            "scoring_adjustments": {
+                "domain_boost": 0.3,
+                "permanence_multiplier": 0.0,
+            },
+        }
+
+    # ── 4. entity_lookup ──
+    if has_entity_signal or len(q) < 40:
+        return {
+            "intent": "entity_lookup",
+            "k": 5,
+            "compact": False,
+            "pre_filter": None,
+            "scoring_adjustments": {
+                "centrality_multiplier": 2.0,
+                "session_multiplier": 2.0,
+            },
+        }
+
+    # ── 5. general ──
+    return {
+        "intent": "general",
+        "k": 5,
+        "compact": False,
+        "pre_filter": None,
+        "scoring_adjustments": {},
+    }
 
 
 # Bootstrap threshold — below this, inject onboarding prompt instead of retrieval.
@@ -625,6 +765,50 @@ def _node_context_minimal(node: dict) -> str:
     return f"- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) [ID: {node['id']}]"
 
 
+def _node_context_compact(node: dict, neighbor_names: list[str]) -> str:
+    """Compact context for broad-query Tier 1 — ~150-200 chars per node.
+
+    Shows: title/type/status, one key date, neighbour count, first sentence.
+    """
+    title = node.get("title", node["id"])
+    ntype = node.get("type", "unknown")
+    status = node.get("status", "")
+    priority = node.get("priority")
+
+    meta_parts: list[str] = []
+    if status:
+        meta_parts.append(status)
+    if priority:
+        meta_parts.append(f"{priority} priority")
+    meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
+    header = f"[{ntype}] {title}{meta_str}"
+
+    # One key date + neighbour count
+    detail_parts: list[str] = []
+    for field in ("due", "deadline", "date"):
+        val = node.get(field)
+        if val:
+            detail_parts.append(f"{field.capitalize()}: {val}")
+            break
+    if neighbor_names:
+        detail_parts.append(f"Connected: {len(neighbor_names)} nodes")
+    detail_line = "  " + " | ".join(detail_parts) if detail_parts else ""
+
+    # First sentence of content (≤100 chars)
+    content = node.get("content", "").strip()
+    first_sentence = ""
+    if content:
+        sentences = re.split(r"(?<=[.!?])\s", content)
+        first_sentence = sentences[0][:100] if sentences else content[:100]
+
+    parts = [header]
+    if detail_line:
+        parts.append(detail_line)
+    if first_sentence:
+        parts.append(f"  {first_sentence}")
+    return "\n".join(parts)
+
+
 _BOOTSTRAP_EMPTY = """\
 BOOTSTRAP MODE — This is a brand new vault with no nodes yet.
 
@@ -799,19 +983,29 @@ class MentorAgent:
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
         logger.info(f"System prompt built from schema ({len(self.system_prompt_template)} chars)")
 
-    def get_context(self, query: str, conversation_history: list[dict] | None = None) -> tuple[str, list[dict]]:
-        """Hybrid retrieval: semantic search + domain filtering + 2-hop traversal + tiered assembly.
+    def _retrieve(self, query: str, conversation_history: list[dict] | None = None) -> dict:
+        """Run the full retrieval pipeline and return a rich result dict.
 
-        If conversation_history is provided, recent user messages boost relevance of
-        nodes mentioned in the ongoing conversation.
-
-        Returns (context_string, search_results).
+        Called by both get_context() and get_context_debug(). Always collects
+        per-candidate scoring state so the debug endpoint has full detail.
         """
+        today = date.today()
+
         # Bootstrap check — if vault is nearly empty, skip retrieval and onboard
         total_nodes = len(self.graph.get_all_nodes())
         if total_nodes < _BOOTSTRAP_THRESHOLD:
             logger.info(f"Bootstrap mode: {total_nodes} nodes (threshold {_BOOTSTRAP_THRESHOLD})")
-            return _bootstrap_context(total_nodes, self.graph), []
+            bootstrap_ctx = _bootstrap_context(total_nodes, self.graph)
+            return {
+                "context": bootstrap_ctx,
+                "top_results": [],
+                "intent": {"intent": "general", "k": 5, "compact": False, "pre_filter": None, "scoring_adjustments": {}},
+                "date_range": None,
+                "domains": [],
+                "candidates": [],
+                "nodes_in_context": {"tier1": 0, "tier2": 0, "tier3": 0},
+                "context_length_chars": len(bootstrap_ctx),
+            }
 
         # Step 0: Temporal query resolution — detect date phrases and find matching nodes
         temporal_node_ids: set[str] = set()
@@ -822,7 +1016,6 @@ class MentorAgent:
             logger.debug(f"Temporal resolution: {date_range[0]} to {date_range[1]}, {len(temporal_node_ids)} nodes")
 
         # Overdue sweep — active nodes past their deadline always surface
-        today = date.today()
         overdue_nodes = _get_overdue_nodes(self.graph, today)
         temporal_node_ids |= {n["id"] for n in overdue_nodes}
         if overdue_nodes:
@@ -831,10 +1024,51 @@ class MentorAgent:
         # Step 1: Classify query domains
         relevant_domains = _classify_domains(query)
 
-        # Step 2: Semantic search — fetch more candidates, we'll rank them
-        search_results = self.vector_index.search(query, n=10)
+        # Step 1.5: Classify query intent for adaptive retrieval
+        try:
+            intent = classify_query_intent(query, date_range, relevant_domains)
+            # domain_filter: fill in the pre_filter from schema (classifier leaves it None)
+            if intent["intent"] == "domain_filter" and relevant_domains:
+                dominant_domain = relevant_domains[0]
+                domain_types = self.schema.get("domains", {}).get(dominant_domain, {}).get("types", [])
+                if domain_types:
+                    intent = dict(intent)  # avoid mutating classifier output
+                    intent["pre_filter"] = build_search_filter(types=domain_types)
+        except Exception as exc:
+            logger.warning(f"classify_query_intent raised {exc!r} — using general intent")
+            intent = {
+                "intent": "general",
+                "k": 5,
+                "compact": False,
+                "pre_filter": None,
+                "scoring_adjustments": {},
+            }
+
+        # Step 2: Semantic search — fetch extra candidates for ranking headroom
+        search_n = intent["k"] + 5
+        pre_filter = intent.get("pre_filter")
+        search_results = self.vector_index.search(query, n=search_n, where=pre_filter)
+
+        # Fallback: if filter was too aggressive, retry without it
+        if pre_filter and len(search_results) < intent["k"] // 2:
+            logger.debug(
+                f"Filtered search returned {len(search_results)} < {intent['k'] // 2} — "
+                "falling back to unfiltered"
+            )
+            search_results = self.vector_index.search(query, n=search_n)
+
         if not search_results and not temporal_node_ids:
-            return "(No relevant nodes found in knowledge graph)", []
+            ctx = "(No relevant nodes found in knowledge graph)"
+            return {
+                "context": ctx,
+                "top_results": [],
+                "intent": intent,
+                "date_range": date_range,
+                "domains": relevant_domains,
+                "candidates": [],
+                "nodes_in_context": {"tier1": 0, "tier2": 0, "tier3": 0},
+                "context_length_chars": len(ctx),
+            }
 
         # Session-aware boosting: search on recent user messages for additional context
         session_boost: dict[str, float] = {}
@@ -848,38 +1082,48 @@ class MentorAgent:
                 except Exception:
                     pass
 
-        # Step 3: Score and rank results
+        # Step 3: Score and rank results using intent-adjusted weights
+        adjustments = intent.get("scoring_adjustments", {})
+        temporal_boost_weight = adjustments.get("temporal_boost", 0.3)
+        permanence_multiplier = adjustments.get("permanence_multiplier", 1.0)
+        recency_multiplier = adjustments.get("recency_multiplier", 1.0)
+        domain_boost_weight = adjustments.get("domain_boost", 0.2)
+        centrality_multiplier = adjustments.get("centrality_multiplier", 1.0)
+        session_multiplier = adjustments.get("session_multiplier", 1.0)
+
         scored: list[tuple[float, dict]] = []
+        candidates_debug: list[dict] = []
+
         for result in search_results:
             # Base score: invert semantic distance (lower distance = higher score)
             semantic_score = max(0, 1.0 - result.get("score", 1.0))
+            node_type = result.get("type", "")
 
             # Domain boost: if node's type belongs to a relevant domain
-            node_type = result.get("type", "")
             domain_boost = 0.0
             if relevant_domains:
                 node_domain = self.schema["types"].get(node_type, {}).get("domain", "")
                 if node_domain == relevant_domains[0]:
-                    domain_boost = 0.2
+                    domain_boost = domain_boost_weight
                 elif node_domain in relevant_domains:
-                    domain_boost = 0.1
+                    domain_boost = domain_boost_weight / 2
 
             # Recency boost for time-sensitive types
             recency_boost = 0.0
             if node_type in _RECENCY_SENSITIVE_TYPES:
                 node = self.graph.get_node(result["id"])
                 if node:
-                    recency_boost = _recency_score(node) * 0.15
+                    recency_boost = _recency_score(node) * 0.15 * recency_multiplier
 
             # Centrality boost — logarithmic so hubs don't dominate
             degree = self.graph.get_degree(result["id"])
-            centrality_boost = min(math.log1p(degree) * 0.02, 0.08)
+            centrality_boost = min(math.log1p(degree) * 0.02, 0.08) * centrality_multiplier
 
             # Temporal boost — nodes matching the date range in the query
-            temporal_boost = 0.3 if result["id"] in temporal_node_ids else 0.0
+            temporal_boost = temporal_boost_weight if result["id"] in temporal_node_ids else 0.0
 
             # Session boost — nodes relevant to conversation history
-            s_boost = session_boost.get(result["id"], 0.0)
+            s_boost = session_boost.get(result["id"], 0.0) * session_multiplier
 
             # Status penalty — deprioritize resolved/inactive nodes
             node_status = str(result.get("status", "") or "").lower()
@@ -889,10 +1133,31 @@ class MentorAgent:
             status_penalty = _STATUS_PENALTIES.get(node_status, 0.0)
 
             # Permanence boost — identity/strategic nodes outrank ephemeral ones
-            _, permanence_boost = _get_permanence(node_type)
+            _, perm_boost = _get_permanence(node_type)
+            permanence_boost = perm_boost * permanence_multiplier
 
-            total = semantic_score + domain_boost + recency_boost + centrality_boost + temporal_boost + s_boost + status_penalty + permanence_boost
+            total = (semantic_score + domain_boost + recency_boost + centrality_boost
+                     + temporal_boost + s_boost + status_penalty + permanence_boost)
+
             scored.append((total, result))
+            candidates_debug.append({
+                "id": result["id"],
+                "title": result.get("title", result["id"]),
+                "type": node_type,
+                "scores": {
+                    "semantic": round(semantic_score, 4),
+                    "domain": round(domain_boost, 4),
+                    "recency": round(recency_boost, 4),
+                    "centrality": round(centrality_boost, 4),
+                    "temporal": round(temporal_boost, 4),
+                    "session": round(s_boost, 4),
+                    "status_penalty": round(status_penalty, 4),
+                    "permanence": round(permanence_boost, 4),
+                    "total": round(total, 4),
+                },
+                "selected": False,
+                "tier": None,
+            })
 
         # Inject temporal nodes not already in semantic results
         result_ids = {r.get("id") for _, r in scored}
@@ -902,13 +1167,32 @@ class MentorAgent:
                 if node:
                     node_status = str(node.get("status", "") or "").lower()
                     _, perm_boost = _get_permanence(node.get("type", ""))
-                    injection_score = 0.3 + _STATUS_PENALTIES.get(node_status, 0.0) + perm_boost
+                    status_pen = _STATUS_PENALTIES.get(node_status, 0.0)
+                    injection_score = 0.3 + status_pen + perm_boost
                     scored.append((injection_score, {
                         "id": nid,
                         "title": node.get("title", nid),
                         "type": node.get("type", "unknown"),
                         "score": 0.5,
                     }))
+                    candidates_debug.append({
+                        "id": nid,
+                        "title": node.get("title", nid),
+                        "type": node.get("type", "unknown"),
+                        "scores": {
+                            "semantic": 0.0,
+                            "domain": 0.0,
+                            "recency": 0.0,
+                            "centrality": 0.0,
+                            "temporal": 0.3,
+                            "session": 0.0,
+                            "status_penalty": round(status_pen, 4),
+                            "permanence": round(perm_boost, 4),
+                            "total": round(injection_score, 4),
+                        },
+                        "selected": False,
+                        "tier": None,
+                    })
 
         # Inject highly-boosted session nodes not already in results
         result_ids = {r.get("id") for _, r in scored}
@@ -922,10 +1206,29 @@ class MentorAgent:
                         "type": node.get("type", "unknown"),
                         "score": 0.5,
                     }))
+                    candidates_debug.append({
+                        "id": nid,
+                        "title": node.get("title", nid),
+                        "type": node.get("type", "unknown"),
+                        "scores": {
+                            "semantic": 0.0, "domain": 0.0, "recency": 0.0, "centrality": 0.0,
+                            "temporal": 0.0, "session": round(boost, 4),
+                            "status_penalty": 0.0, "permanence": 0.0,
+                            "total": round(boost, 4),
+                        },
+                        "selected": False,
+                        "tier": None,
+                    })
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        top_results = [r for _, r in scored[:5]]
+        top_results = [r for _, r in scored[:intent["k"]]]
         direct_ids = {r["id"] for r in top_results}
+
+        # Mark selected candidates as tier 1
+        for c in candidates_debug:
+            if c["id"] in direct_ids:
+                c["selected"] = True
+                c["tier"] = 1
 
         # Step 4: 2-hop graph traversal from direct matches
         hop1_ids: set[str] = set()
@@ -942,6 +1245,7 @@ class MentorAgent:
                     hop2_ids.add(nid)
 
         # Step 5: Assemble tiered context with token budget
+        compact = intent.get("compact", False)
         context_parts: list[str] = []
         char_budget = _MAX_CONTEXT_TOKENS * _CHARS_PER_TOKEN
         chars_used = 0
@@ -956,9 +1260,14 @@ class MentorAgent:
                 temporal_header_parts.append(
                     f"Query range: {start.strftime('%A %d %b')} – {end.strftime('%A %d %b %Y')}"
                 )
-        # Collect all date-bearing nodes from top results + temporal matches for the header
-        all_top_ids = {r["id"] for _, r in scored[:5]} | temporal_node_ids
+
+        # Collect date facts; cap at 10 in compact mode to avoid header bloat
+        all_top_ids = direct_ids | temporal_node_ids
+        max_facts = 10 if compact else None
+        fact_count = 0
         for nid in all_top_ids:
+            if max_facts is not None and fact_count >= max_facts:
+                break
             node = self.graph.get_node(nid)
             if not node:
                 continue
@@ -991,6 +1300,7 @@ class MentorAgent:
                     temporal_header_parts.append(
                         f"FACT: {node.get('title', nid)} — {parsed.strftime('%A %d %B %Y')} ({dist})"
                     )
+                    fact_count += 1
                     break  # one date per node in header
 
         if len(temporal_header_parts) > 1:
@@ -998,37 +1308,48 @@ class MentorAgent:
             context_parts.append(header)
             chars_used += len(header)
 
-        # Tier 1: Direct matches — full content
+        # Tier 1: Direct matches — compact format for broad queries, full content otherwise
+        tier1_count = 0
         for result in top_results:
             node = self.graph.get_node(result["id"])
             if node is None:
                 continue
             neighbors = self.graph.get_neighbors(result["id"], depth=1)
             neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
-            block = _node_context_full(node, neighbor_names)
+            if compact:
+                block = _node_context_compact(node, neighbor_names)
+            else:
+                block = _node_context_full(node, neighbor_names)
 
             if chars_used + len(block) > char_budget:
                 break
             context_parts.append(block)
             chars_used += len(block)
+            tier1_count += 1
 
-        # Tier 2: 1-hop neighbors — summary (frontmatter + first paragraph)
+        # Tier 2: 1-hop neighbors — minimal in compact mode, summary otherwise
+        tier2_count = 0
         if chars_used < char_budget and hop1_ids:
             context_parts.append("\n--- Connected nodes (1 hop) ---")
             for nid in sorted(hop1_ids):
                 node = self.graph.get_node(nid)
                 if node is None:
                     continue
-                neighbors = self.graph.get_neighbors(nid, depth=1)
-                neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
-                block = _node_context_summary(node, neighbor_names)
+                if compact:
+                    block = _node_context_minimal(node)
+                else:
+                    neighbors = self.graph.get_neighbors(nid, depth=1)
+                    neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
+                    block = _node_context_summary(node, neighbor_names)
 
                 if chars_used + len(block) > char_budget:
                     break
                 context_parts.append(block)
                 chars_used += len(block)
+                tier2_count += 1
 
-        # Tier 3: 2-hop neighbors — one-line mentions
+        # Tier 3: 2-hop neighbors — one-line mentions (unchanged)
+        tier3_count = 0
         if chars_used < char_budget and hop2_ids:
             context_parts.append("\n--- Nearby in graph (2 hops) ---")
             for nid in sorted(hop2_ids):
@@ -1041,13 +1362,58 @@ class MentorAgent:
                     break
                 context_parts.append(line)
                 chars_used += len(line)
+                tier3_count += 1
 
         context = "\n".join(context_parts) if context_parts else "(No relevant nodes found in knowledge graph)"
         logger.debug(
             f"Context assembled: {len(direct_ids)} direct, {len(hop1_ids)} hop-1, "
-            f"{len(hop2_ids)} hop-2, ~{chars_used // _CHARS_PER_TOKEN} tokens"
+            f"{len(hop2_ids)} hop-2, ~{chars_used // _CHARS_PER_TOKEN} tokens, "
+            f"intent={intent['intent']}, compact={compact}"
         )
-        return context, top_results
+
+        return {
+            "context": context,
+            "top_results": top_results,
+            "intent": intent,
+            "date_range": date_range,
+            "domains": relevant_domains,
+            "candidates": candidates_debug,
+            "nodes_in_context": {"tier1": tier1_count, "tier2": tier2_count, "tier3": tier3_count},
+            "context_length_chars": chars_used,
+        }
+
+    def get_context(self, query: str, conversation_history: list[dict] | None = None) -> tuple[str, list[dict]]:
+        """Hybrid retrieval: semantic search + domain filtering + 2-hop traversal + tiered assembly.
+
+        If conversation_history is provided, recent user messages boost relevance of
+        nodes mentioned in the ongoing conversation.
+
+        Returns (context_string, search_results).
+        """
+        result = self._retrieve(query, conversation_history)
+        return result["context"], result["top_results"]
+
+    def get_context_debug(self, query: str, conversation_history: list[dict] | None = None) -> dict:
+        """Run the retrieval pipeline and return full diagnostic state for debugging.
+
+        Returns a dict with intent classification, per-candidate scoring breakdown,
+        and context assembly statistics suitable for the /api/debug/retrieval endpoint.
+        """
+        result = self._retrieve(query, conversation_history)
+        date_range = result["date_range"]
+        return {
+            "query": query,
+            "intent": result["intent"],
+            "date_range": (
+                [date_range[0].isoformat(), date_range[1].isoformat()]
+                if date_range else None
+            ),
+            "domains": result["domains"],
+            "candidates": result["candidates"],
+            "context_length_chars": result["context_length_chars"],
+            "context_length_tokens_est": result["context_length_chars"] // _CHARS_PER_TOKEN,
+            "nodes_in_context": result["nodes_in_context"],
+        }
 
     @staticmethod
     def _build_challenge_note(challenges: dict) -> str:

@@ -12,6 +12,37 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "vault_nodes"
 
 
+def build_search_filter(
+    types: list[str] | None = None,
+    exclude_statuses: list[str] | None = None,
+) -> dict | None:
+    """Build a ChromaDB ``where`` clause from friendly parameters.
+
+    Args:
+        types: If provided, only documents whose ``type`` metadata field is in
+               this list are returned.
+        exclude_statuses: If provided, documents whose ``status`` metadata field
+                          matches any of these values are excluded.  Only works
+                          reliably for nodes that have ``status`` in metadata.
+
+    Returns:
+        A ChromaDB ``where`` dict, or ``None`` if no filters are requested.
+    """
+    filters: list[dict] = []
+
+    if types:
+        filters.append({"type": {"$in": types}})
+
+    if exclude_statuses:
+        filters.append({"status": {"$nin": exclude_statuses}})
+
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+    return {"$and": filters}
+
+
 class VectorIndex:
     """Embeds and searches vault nodes via ChromaDB."""
 
@@ -51,7 +82,13 @@ class VectorIndex:
             "type": node.get("type", "unknown"),
             "title": title,
             "tags": tags_str,
+            "status": str(node.get("status") or ""),
         }
+        # Include domain if the caller has set it on the node dict
+        domain = node.get("domain")
+        if domain:
+            metadata["domain"] = str(domain)
+
         for date_field in ("date", "due", "deadline", "created"):
             val = node.get(date_field)
             if val:
@@ -90,8 +127,17 @@ class VectorIndex:
         except Exception:
             pass
 
-    def search(self, query: str, n: int = 5) -> list[dict]:
-        """Semantic search, returning ranked results."""
+    def search(self, query: str, n: int = 5, where: dict | None = None) -> list[dict]:
+        """Semantic search, returning ranked results.
+
+        Args:
+            query: The search query string.
+            n: Maximum number of results to return.
+            where: Optional ChromaDB metadata filter.  When supplied, only
+                   documents matching the filter are considered before ranking.
+                   Falls back to unfiltered search if the filter clause is
+                   malformed.
+        """
         try:
             count = self.collection.count()
         except Exception:
@@ -105,7 +151,17 @@ class VectorIndex:
         # Don't request more results than exist
         n = min(n, self.collection.count())
 
-        results = self.collection.query(query_texts=[query], n_results=n)
+        try:
+            kwargs: dict = {"query_texts": [query], "n_results": n}
+            if where is not None:
+                kwargs["where"] = where
+            results = self.collection.query(**kwargs)
+        except (ValueError, Exception) as exc:
+            if where is not None:
+                logger.warning(f"ChromaDB where filter raised {exc!r} — retrying without filter")
+                results = self.collection.query(query_texts=[query], n_results=n)
+            else:
+                raise
 
         output = []
         for i, node_id in enumerate(results["ids"][0]):

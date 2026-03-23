@@ -96,7 +96,7 @@ class FakeVectorIndex:
     def __init__(self, results):
         self._results = results
 
-    def search(self, query, n=10):
+    def search(self, query, n=10, where=None):
         return self._results[:n]
 
     def find_duplicates(self, *a, **kw):
