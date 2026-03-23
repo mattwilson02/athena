@@ -5,7 +5,7 @@
   import NodeDetail from './NodeDetail.svelte';
   import * as THREE from 'three';
 
-  let { schema = null, filter = null, selectedNode = null } = $props();
+  let { schema = null, filter = null, selectedNode = null, onNodeDelete = () => {} } = $props();
 
   let selectedId = $state(null);
   let hoveredId = $state(null);
@@ -200,6 +200,7 @@
       {schema}
       onClose={closeDetail}
       onNodeClick={(id) => selectNode(id)}
+      onDelete={(id) => { closeDetail(); loadGraph(); onNodeDelete(id); }}
     />
   {/if}
 </div>
