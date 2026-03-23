@@ -176,3 +176,9 @@ export function getInsights() {
 export function getAccountability() {
   return fetchJSON(`${BASE}/accountability`);
 }
+
+// --- Debug ---
+
+export function getRetrievalDiagnostics(query) {
+  return fetchJSON(`${BASE}/debug/retrieval?q=${encodeURIComponent(query)}`);
+}

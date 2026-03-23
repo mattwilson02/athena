@@ -42,3 +42,7 @@ Thumbs.db
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Ralph working files
+ralph.log
+.ralph-state.json
