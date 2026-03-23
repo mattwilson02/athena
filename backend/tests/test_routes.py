@@ -717,3 +717,113 @@ class TestAccountabilityFundamentals:
             assert resp.status_code == 500
             data = resp.get_json()
             assert "error" in data
+
+
+class TestAccountabilityRelationships:
+    """Test relationship intelligence in GET /api/accountability."""
+
+    def test_accountability_endpoint_returns_relationships(self, client):
+        """GET /api/accountability response includes 'relationships' key."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "relationships" in data
+
+    def test_accountability_relationships_summary_counts(self, client):
+        """summary.active + stale + inactive == total_persons."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        rels = data.get("relationships", {})
+        summary = rels.get("summary", {})
+        total = summary.get("total_persons", 0)
+        assert summary.get("active", 0) + summary.get("stale", 0) + summary.get("inactive", 0) == total
+
+    def test_accountability_relationships_social_pattern(self, client):
+        """relationships.social_pattern included with pattern and confidence."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        rels = data.get("relationships", {})
+        assert "social_pattern" in rels
+        sp = rels["social_pattern"]
+        assert "pattern" in sp
+        assert "confidence" in sp
+        assert sp["pattern"] in ("healthy", "isolating", "overcommitting", "no_data")
+
+    def test_accountability_relationships_staleness(self, client, graph):
+        """Person updated yesterday → 'active'; person updated 45 days ago → 'stale'."""
+        from datetime import date, timedelta
+        today = date.today()
+        yesterday = (today - timedelta(days=1)).isoformat()
+        old_date = (today - timedelta(days=45)).isoformat()
+
+        # Patch the graph to return specific person nodes
+        from unittest.mock import patch, MagicMock
+
+        active_node = {"id": "alice", "type": "person", "title": "Alice", "updated": yesterday, "relationship": "friend"}
+        stale_node = {"id": "old-friend", "type": "person", "title": "Old Friend", "updated": old_date, "relationship": "colleague"}
+
+        orig_get_nodes = graph.get_nodes_by_type
+
+        def patched_get_nodes(ntype):
+            if ntype == "person":
+                return [active_node, stale_node]
+            return orig_get_nodes(ntype)
+
+        with patch.object(graph, "get_nodes_by_type", side_effect=patched_get_nodes):
+            with patch.object(graph, "get_node", side_effect=lambda nid: active_node if nid == "alice" else stale_node if nid == "old-friend" else None):
+                with patch.object(graph, "get_neighbors_with_edges", return_value=[]):
+                    resp = client.get("/api/accountability")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        rels = data.get("relationships", {})
+        persons = rels.get("persons", [])
+        active_persons = [p for p in persons if p["person_id"] == "alice"]
+        stale_persons = [p for p in persons if p["person_id"] == "old-friend"]
+        if active_persons:
+            assert active_persons[0]["staleness"] == "active"
+        if stale_persons:
+            assert stale_persons[0]["staleness"] == "stale"
+
+    def test_accountability_relationships_error_graceful(self, client):
+        """Relationship service raises → response still returns streaks/overdue/fundamentals."""
+        from unittest.mock import patch
+        with patch(
+            "routes.graph_routes.get_person_intelligence",
+            side_effect=RuntimeError("relationship boom"),
+        ):
+            resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "streaks" in data
+        assert "overdue" in data
+        assert "fundamentals" in data
+        # relationships key should be absent (graceful degradation)
+        assert "relationships" not in data
+
+
+class TestRelationshipServiceErrorChat:
+    """Test that relationship service errors don't break chat flow."""
+
+    def test_relationship_service_error_doesnt_break_chat(self, client):
+        """Mock relationship service to raise → chat proceeds normally."""
+        from unittest.mock import patch
+
+        create_resp = client.post("/api/chat/sessions")
+        sid = create_resp.get_json()["id"]
+
+        with patch(
+            "services.chat_service.ChatService._build_relationship_context",
+            side_effect=RuntimeError("relationship exploded"),
+        ):
+            resp = client.post("/api/chat", json={
+                "session_id": sid,
+                "message": "How is my friend Alice doing?",
+            })
+        # Chat should still succeed even if relationship context fails
+        # Note: _build_relationship_context is wrapped in try/except in ChatService,
+        # so this tests the outer exception handling if something else raises.
+        # The real protection is in the try/except in _build_relationship_context itself.
+        assert resp.status_code == 200

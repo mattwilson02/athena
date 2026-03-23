@@ -223,6 +223,12 @@ def _load_soul(vault_path: str | None = None) -> tuple[str, str, dict[str, str]]
             if line.startswith("- "):
                 instruction_parts.append(line)
 
+    # Include behavioral guidance sections as full text blocks
+    for _section_key in ("conflict protocol", "challenge ladder", "state awareness", "relationship intelligence"):
+        if _section_key in sections:
+            _title = _section_key.title()
+            instruction_parts.append(f"\n{_title.upper()}:\n{sections[_section_key]}")
+
     instructions = "\n".join(instruction_parts)
 
     # Parse mode subsections from the ## Modes section
@@ -1154,6 +1160,71 @@ class MentorAgent:
         return result
 
     @staticmethod
+    def _build_relationship_note(relationship_context: dict | None) -> str:
+        """Build the SOCIAL CONTEXT injection for the system prompt.
+
+        Only injected when the message is people-domain classified.
+        Returns empty string when relationship_context is None.
+        """
+        if not relationship_context:
+            return ""
+
+        mentions = relationship_context.get("mentions", [])
+        person_intel = relationship_context.get("person_intelligence", [])
+        social_patterns = relationship_context.get("social_patterns", {})
+
+        lines = ["\n\nSOCIAL CONTEXT — the user's message relates to people. Here's what you know:"]
+
+        if mentions:
+            lines.append("\nMENTIONED IN THIS SESSION:")
+            for m in mentions:
+                title = m.get("person_title", "?")
+                rel = m.get("relationship")
+                count = m.get("mention_count", 0)
+                contexts = m.get("contexts", [])
+                sentiment = m.get("sentiment", "neutral")
+
+                rel_str = f" ({rel})" if rel else ""
+                ctx_str = ""
+                if contexts:
+                    # Show first 2 contexts, truncated
+                    ctx_parts = [f'"{c[:60]}"' for c in contexts[:2]]
+                    ctx_str = f". Contexts: {', '.join(ctx_parts)}"
+                lines.append(
+                    f'- {title}{rel_str} — mentioned {count} time{"s" if count != 1 else ""}'
+                    f"{ctx_str}. Sentiment: {sentiment}."
+                )
+
+        if person_intel:
+            active_rels = [
+                p["person_title"] for p in person_intel
+                if p.get("days_since_update") is not None and p["days_since_update"] <= 14
+            ]
+            stale_rels = [
+                p["person_title"] for p in person_intel
+                if p.get("days_since_update") is None or p["days_since_update"] > 30
+            ]
+
+            lines.append("\nRELATIONSHIP HEALTH:")
+            if active_rels:
+                lines.append(f"- Active relationships (updated <14 days): {', '.join(active_rels)}")
+            if stale_rels:
+                lines.append(f"- Stale relationships (no updates 30+ days): {', '.join(stale_rels)}")
+
+            pattern = social_patterns.get("pattern", "healthy")
+            confidence = social_patterns.get("confidence", "low")
+            lines.append(f"- Social pattern: {pattern} (confidence: {confidence})")
+
+        lines.append(
+            "\nWhen a person is mentioned:\n"
+            "- Reference their node and connections — don't treat them as strangers.\n"
+            "- If you notice a pattern (mentioned often but never seen, always in stressful context), name it.\n"
+            "- If a relationship is stale, consider asking about it naturally: \"You haven't mentioned X in a while.\""
+        )
+
+        return "\n".join(lines)
+
+    @staticmethod
     def _build_state_note(state: dict) -> str:
         """Build the USER STATE injection for the system prompt.
 
@@ -1226,6 +1297,7 @@ class MentorAgent:
         overdue = alerts.get("overdue_commitments", [])[:3]
         neglected = alerts.get("neglected_fundamentals", [])[:3]
         untracked = alerts.get("untracked_fundamentals", [])[:2]
+        social_pattern = alerts.get("social_pattern")
 
         # State-aware suppression
         _state = state or {}
@@ -1258,7 +1330,7 @@ class MentorAgent:
                 remaining = max(0, remaining - len(neglected))
                 untracked = untracked[:remaining]
 
-        if not broken and not at_risk and not overdue and not neglected and not untracked:
+        if not broken and not at_risk and not overdue and not neglected and not untracked and not social_pattern:
             return ""
 
         lines = [
@@ -1330,6 +1402,21 @@ class MentorAgent:
                 name = f["fundamental"].replace("_", " ").title()
                 lines.append(f"- {name} — consider suggesting a {name.lower()}-related habit.")
 
+        if social_pattern and isinstance(social_pattern, dict):
+            sp_pattern = social_pattern.get("pattern", "healthy")
+            sp_confidence = social_pattern.get("confidence", "low")
+            sp_signals = social_pattern.get("signals", [])
+            stale_rels = social_pattern.get("stale_relationships", [])
+            if sp_pattern == "isolating" and sp_confidence in ("medium", "high"):
+                signal_details = "; ".join(s.get("detail", "") for s in sp_signals if s.get("detail"))
+                lines.append(
+                    f"\nSOCIAL PATTERN: Possible isolation detected. {signal_details}."
+                    "\nDon't lecture — ask naturally about people they haven't mentioned."
+                )
+                if stale_rels:
+                    stale_names = [r.get("person_title", "?") for r in stale_rels[:3]]
+                    lines.append(f'  Example: "How\'s {stale_names[0]} doing?"')
+
         return "\n".join(lines)
 
     def chat_stream(self, message: str, conversation_history: list[dict],
@@ -1338,7 +1425,8 @@ class MentorAgent:
                     mode: str = "mirror",
                     challenges: dict | None = None,
                     alerts: dict | None = None,
-                    state: dict | None = None):
+                    state: dict | None = None,
+                    relationship_context: dict | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -1350,6 +1438,7 @@ class MentorAgent:
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
         system += self._build_state_note(state or {})
+        system += self._build_relationship_note(relationship_context)
         system += self._build_proactive_alerts(alerts or {}, state=state)
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)
@@ -1431,7 +1520,8 @@ class MentorAgent:
              mode: str = "mirror",
              challenges: dict | None = None,
              alerts: dict | None = None,
-             state: dict | None = None) -> dict:
+             state: dict | None = None,
+             relationship_context: dict | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
@@ -1441,12 +1531,14 @@ class MentorAgent:
         challenges: active challenge ladder states keyed by node_id.
         alerts: proactive accountability alerts (broken streaks, overdue commitments).
         state: inferred user state (energy, stress, confidence) from recent messages.
+        relationship_context: per-person mention data and social patterns (people-domain only).
         """
         context, search_results = self.get_context(message, conversation_history)
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
         system += self._build_state_note(state or {})
+        system += self._build_relationship_note(relationship_context)
         system += self._build_proactive_alerts(alerts or {}, state=state)
         system += self._build_conflict_note(conflicts or [])
         system += self._build_mode_note(mode)

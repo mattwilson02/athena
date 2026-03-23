@@ -55,6 +55,24 @@
     if (status === 'neglected') return 'Neglected';
     return 'Untracked';
   }
+
+  function stalenessLabel(staleness) {
+    if (staleness === 'active') return 'Active';
+    if (staleness === 'inactive') return 'Inactive';
+    return 'Stale';
+  }
+
+  function relationshipLabel(rel) {
+    if (!rel) return '';
+    return rel.charAt(0).toUpperCase() + rel.slice(1);
+  }
+
+  function socialPatternLabel(pattern) {
+    if (pattern === 'isolating') return 'Isolation Detected';
+    if (pattern === 'overcommitting') return 'Overcommitting';
+    if (pattern === 'no_data') return 'No Data';
+    return 'Healthy';
+  }
 </script>
 
 <div class="accountability-view">
@@ -202,6 +220,78 @@
             </div>
           {/each}
         </div>
+      </section>
+    {/if}
+
+    <!-- Relationships section -->
+    {#if data.relationships}
+      <section class="section">
+        <div class="section-header">
+          <h3 class="section-title">Relationships</h3>
+          {#if data.relationships.summary}
+            <div class="rel-summary">
+              <span class="rel-stat active">{data.relationships.summary.active} active</span>
+              <span class="rel-stat stale">{data.relationships.summary.stale} stale</span>
+              {#if data.relationships.summary.inactive > 0}
+                <span class="rel-stat inactive">{data.relationships.summary.inactive} inactive</span>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <!-- Social pattern banner -->
+        {#if data.relationships.social_pattern && data.relationships.social_pattern.pattern !== 'healthy' && data.relationships.social_pattern.pattern !== 'no_data'}
+          <div class="social-pattern-banner" class:isolating={data.relationships.social_pattern.pattern === 'isolating'} class:overcommitting={data.relationships.social_pattern.pattern === 'overcommitting'}>
+            <div class="social-pattern-header">
+              <span class="social-pattern-label">{socialPatternLabel(data.relationships.social_pattern.pattern)}</span>
+              <span class="social-pattern-confidence">{data.relationships.social_pattern.confidence} confidence</span>
+            </div>
+            {#if data.relationships.social_pattern.signals && data.relationships.social_pattern.signals.length > 0}
+              <div class="social-pattern-signals">
+                {#each data.relationships.social_pattern.signals as signal}
+                  <span class="social-signal">{signal.detail}</span>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        {#if data.relationships.persons && data.relationships.persons.length === 0}
+          <div class="empty-state">No person nodes in graph yet.</div>
+        {:else if data.relationships.persons}
+          <div class="person-list">
+            {#each data.relationships.persons as person}
+              <div class="person-card" class:person-active={person.staleness === 'active'} class:person-stale={person.staleness === 'stale'} class:person-inactive={person.staleness === 'inactive'}>
+                <div class="person-header">
+                  <div class="person-name-row">
+                    <span class="person-name">{person.person_title}</span>
+                    {#if person.relationship}
+                      <span class="person-rel-type">{relationshipLabel(person.relationship)}</span>
+                    {/if}
+                  </div>
+                  <span class="person-staleness-badge {person.staleness}">{stalenessLabel(person.staleness)}</span>
+                </div>
+                <div class="person-meta">
+                  <span class="person-last-updated">
+                    {#if person.days_since_update != null}
+                      Last updated: {formatDaysAgo(person.days_since_update)}
+                    {:else}
+                      Never updated
+                    {/if}
+                  </span>
+                  <span class="person-connections">{person.connected_node_count} connections</span>
+                </div>
+                {#if person.connection_types && person.connection_types.length > 0}
+                  <div class="person-connection-types">
+                    {#each person.connection_types as type}
+                      <span class="connection-type-chip">{type}</span>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
       </section>
     {/if}
   {/if}
@@ -595,5 +685,196 @@
     color: var(--text-muted);
     font-style: italic;
     line-height: 1.4;
+  }
+
+  /* Relationships */
+  .rel-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  .rel-stat {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 99px;
+  }
+
+  .rel-stat.active {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+
+  .rel-stat.stale {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+
+  .rel-stat.inactive {
+    background: var(--bg-surface-hover);
+    color: var(--text-muted);
+  }
+
+  /* Social pattern banner */
+  .social-pattern-banner {
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+  }
+
+  .social-pattern-banner.isolating {
+    background: var(--error-soft);
+    border-color: var(--error);
+  }
+
+  .social-pattern-banner.overcommitting {
+    background: var(--warning-soft);
+    border-color: var(--warning);
+  }
+
+  .social-pattern-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+  }
+
+  .social-pattern-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+
+  .isolating .social-pattern-label { color: var(--error); }
+  .overcommitting .social-pattern-label { color: var(--warning); }
+
+  .social-pattern-confidence {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-transform: capitalize;
+  }
+
+  .social-pattern-signals {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .social-signal {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  /* Person list */
+  .person-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+
+  .person-card {
+    padding: var(--space-md);
+    background: var(--bg-surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+  }
+
+  .person-card.person-active { border-left: 3px solid var(--success); }
+  .person-card.person-stale { border-left: 3px solid var(--warning); }
+  .person-card.person-inactive { border-left: 3px solid var(--border); opacity: 0.6; }
+
+  .person-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+  }
+
+  .person-name-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .person-name {
+    font-size: var(--text-base);
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .person-rel-type {
+    font-size: var(--text-xs);
+    color: #60a5fa;
+    background: rgba(96, 165, 250, 0.1);
+    padding: 1px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .person-staleness-badge {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 99px;
+    flex-shrink: 0;
+  }
+
+  .person-staleness-badge.active {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+
+  .person-staleness-badge.stale {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+
+  .person-staleness-badge.inactive {
+    background: var(--bg-surface-hover);
+    color: var(--text-muted);
+  }
+
+  .person-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .person-last-updated {
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .person-connections {
+    color: var(--text-muted);
+  }
+
+  .person-connection-types {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+  }
+
+  .connection-type-chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    background: var(--bg-surface-hover);
+    border-radius: 4px;
+    color: var(--text-muted);
+    text-transform: capitalize;
   }
 </style>

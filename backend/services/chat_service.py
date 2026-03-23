@@ -8,7 +8,7 @@ import anthropic
 
 from datetime import date, datetime, timezone
 
-from mentor_agent import classify_mode, _get_permanence
+from mentor_agent import classify_mode, _get_permanence, _classify_domains
 from services.conflict_service import detect_conflicts
 from services.state_service import infer_state
 from services.vault_service import _PERMANENCE_WARNINGS
@@ -66,6 +66,38 @@ class ChatService:
             logger.exception("State inference failed — proceeding with empty state")
             return {}
 
+    def _build_relationship_context(self, session_id: str, message: str, alerts: dict) -> dict | None:
+        """Build relationship context when message is people-domain classified.
+
+        Returns None if not people-related or if the service raises.
+        """
+        try:
+            if "People" not in _classify_domains(message):
+                return None
+            person_nodes = self.graph.get_nodes_by_type("person")
+            if not person_nodes:
+                return None
+            from services.relationship_service import (
+                scan_person_mentions, get_person_intelligence, detect_social_patterns,
+            )
+            session = self.chat_store.get_session(session_id)
+            recent_messages = (session.get("messages", []) if session else [])[-20:]
+            mentions = scan_person_mentions(recent_messages, person_nodes)
+            person_intel = get_person_intelligence(self.graph, date.today())
+            fundamentals = (
+                alerts.get("neglected_fundamentals", [])
+                + alerts.get("untracked_fundamentals", [])
+            )
+            social_patterns = detect_social_patterns(person_intel, fundamentals, self.graph, date.today())
+            return {
+                "mentions": mentions,
+                "person_intelligence": person_intel,
+                "social_patterns": social_patterns,
+            }
+        except Exception:
+            logger.exception("Relationship context failed — proceeding without it")
+            return None
+
     def send_message(self, session_id: str, message: str) -> dict:
         """Process a user message. Returns {response, graph_updates, relevant_nodes, conflicts} or {error}."""
         if self.mentor is None:
@@ -100,6 +132,20 @@ class ChatService:
             logger.exception("Alert computation failed — proceeding with empty alerts")
             alerts = {}
 
+        # Build relationship context (only for people-domain messages; defensive)
+        try:
+            relationship_context = self._build_relationship_context(session_id, message, alerts)
+        except Exception:
+            logger.exception("Relationship context failed — proceeding without it")
+            relationship_context = None
+
+        # Add social pattern to alerts for proactive injection if isolation detected
+        if relationship_context:
+            social_patterns = relationship_context.get("social_patterns", {})
+            if social_patterns.get("pattern") == "isolating" and social_patterns.get("confidence") in ("medium", "high"):
+                alerts = dict(alerts)
+                alerts["social_pattern"] = social_patterns
+
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
 
@@ -108,7 +154,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state, relationship_context=relationship_context)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -184,12 +230,26 @@ class ChatService:
             logger.exception("Alert computation failed — proceeding with empty alerts")
             alerts = {}
 
+        # Build relationship context (only for people-domain messages; defensive)
+        try:
+            relationship_context = self._build_relationship_context(session_id, message, alerts)
+        except Exception:
+            logger.exception("Relationship context failed — proceeding without it")
+            relationship_context = None
+
+        # Add social pattern to alerts for proactive injection if isolation detected
+        if relationship_context:
+            social_patterns = relationship_context.get("social_patterns", {})
+            if social_patterns.get("pattern") == "isolating" and social_patterns.get("confidence") in ("medium", "high"):
+                alerts = dict(alerts)
+                alerts["social_pattern"] = social_patterns
+
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state, relationship_context=relationship_context):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":

@@ -1,7 +1,7 @@
 {
-  "sprint": 5,
+  "sprint": 6,
   "phase": "pr",
-  "specName": "sprint-5-state-inference-and-fundamentals",
-  "specPath": "/Users/matt/development/athena/docs/sprints/sprint-5-state-inference-and-fundamentals.md",
-  "branchName": "sprint/sprint-5-state-inference-and-fundamentals"
+  "specName": "sprint-6-relationship-intelligence",
+  "specPath": "/Users/matt/development/athena/docs/sprints/sprint-6-relationship-intelligence.md",
+  "branchName": "sprint/sprint-6-relationship-intelligence"
 }

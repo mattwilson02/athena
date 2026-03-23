@@ -1335,3 +1335,149 @@ class TestSoulStateAwarenessParsed:
         with open(candidate, "r", encoding="utf-8") as f:
             soul_content = f.read()
         assert "State Awareness" in soul_content
+
+
+# ── Relationship Note ──
+
+
+class TestBuildRelationshipNote:
+    """Test MentorAgent._build_relationship_note()."""
+
+    def test_relationship_note_none_when_empty(self):
+        """None context → empty string."""
+        result = MentorAgent._build_relationship_note(None)
+        assert result == ""
+
+    def test_relationship_note_empty_dict_returns_empty(self):
+        """Empty dict → empty string."""
+        result = MentorAgent._build_relationship_note({})
+        assert result == ""
+
+    def test_relationship_note_with_mentions(self):
+        """Mentions present → note includes 'MENTIONED IN THIS SESSION'."""
+        context = {
+            "mentions": [
+                {
+                    "person_id": "ben",
+                    "person_title": "Ben",
+                    "relationship": "friend",
+                    "mention_count": 3,
+                    "contexts": ["Ben and I are planning Citadel Technica"],
+                    "sentiment": "positive",
+                }
+            ],
+            "person_intelligence": [],
+            "social_patterns": {"pattern": "healthy", "confidence": "low", "signals": []},
+        }
+        result = MentorAgent._build_relationship_note(context)
+        assert "SOCIAL CONTEXT" in result
+        assert "MENTIONED IN THIS SESSION" in result
+        assert "Ben" in result
+        assert "3 times" in result
+
+    def test_relationship_note_includes_health(self):
+        """Person intelligence present → note includes 'RELATIONSHIP HEALTH'."""
+        context = {
+            "mentions": [],
+            "person_intelligence": [
+                {
+                    "person_id": "ben",
+                    "person_title": "Ben",
+                    "relationship": "friend",
+                    "last_updated": "2026-03-20",
+                    "days_since_update": 3,
+                    "connected_node_count": 2,
+                    "connected_active_count": 2,
+                    "connection_types": ["project"],
+                },
+            ],
+            "social_patterns": {"pattern": "healthy", "confidence": "low", "signals": []},
+        }
+        result = MentorAgent._build_relationship_note(context)
+        assert "RELATIONSHIP HEALTH" in result
+
+    def test_relationship_note_isolation_alert(self):
+        """Isolating pattern → note contains stale relationship guidance."""
+        context = {
+            "mentions": [],
+            "person_intelligence": [
+                {
+                    "person_id": "romane",
+                    "person_title": "Romane",
+                    "relationship": "friend",
+                    "last_updated": "2026-01-01",
+                    "days_since_update": 80,
+                    "connected_node_count": 1,
+                    "connected_active_count": 0,
+                    "connection_types": [],
+                },
+            ],
+            "social_patterns": {
+                "pattern": "isolating",
+                "confidence": "high",
+                "signals": [{"type": "stale_relationships", "detail": "8 of 11 stale"}],
+                "stale_relationships": [{"person_id": "romane", "person_title": "Romane", "days_since_update": 80}],
+                "active_relationships": [],
+            },
+        }
+        result = MentorAgent._build_relationship_note(context)
+        assert "SOCIAL CONTEXT" in result
+        assert "Stale relationships" in result or "stale" in result.lower()
+
+
+# ── SOUL.md Relationship Intelligence parsed ──
+
+
+def _parse_soul_sections(soul_path: str) -> dict[str, str]:
+    """Parse SOUL.md sections dict (duplicates the _load_soul parser)."""
+    with open(soul_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    sections: dict[str, str] = {}
+    current_heading = None
+    current_lines: list[str] = []
+    for line in content.split("\n"):
+        if line.startswith("## "):
+            if current_heading:
+                sections[current_heading] = "\n".join(current_lines).strip()
+            current_heading = line[3:].strip().lower()
+            current_lines = []
+        elif current_heading is not None:
+            current_lines.append(line)
+    if current_heading:
+        sections[current_heading] = "\n".join(current_lines).strip()
+    return sections
+
+
+class TestSoulRelationshipIntelligenceParsed:
+    """Test that SOUL.md contains and _load_soul() captures the Relationship Intelligence section."""
+
+    def _get_soul_path(self) -> str | None:
+        import os
+        candidates = [
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SOUL.md")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "SOUL.md")),
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def test_soul_relationship_intelligence_parsed(self):
+        """'relationship intelligence' key present in parsed sections from SOUL.md."""
+        soul_path = self._get_soul_path()
+        if soul_path is None:
+            pytest.skip("SOUL.md not found — skipping soul parsing test")
+        sections = _parse_soul_sections(soul_path)
+        assert "relationship intelligence" in sections
+        assert sections["relationship intelligence"].strip() != ""
+
+    def test_system_prompt_includes_relationship_intelligence(self):
+        """System prompt built from SOUL.md contains 'Relationship Intelligence' text."""
+        import os
+        soul_path = self._get_soul_path()
+        if soul_path is None:
+            pytest.skip("SOUL.md not found — skipping system prompt test")
+
+        prompt_template, _ = build_system_prompt(_MINIMAL_SCHEMA)
+        # The relationship intelligence section is included in the instructions block
+        assert "Relationship Intelligence" in prompt_template or "RELATIONSHIP INTELLIGENCE" in prompt_template

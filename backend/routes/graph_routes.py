@@ -12,6 +12,7 @@ import anthropic
 from flask import Blueprint, current_app, jsonify, request
 
 from services.accountability_service import calculate_streaks, find_overdue_commitments, check_fundamentals
+from services.relationship_service import get_person_intelligence, detect_social_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ def get_accountability():
     f_neglected = sum(1 for f in fundamentals if f["status"] == "neglected")
     f_no_data = sum(1 for f in fundamentals if f["status"] == "no_data")
 
-    return jsonify({
+    response_data = {
         "streaks": streaks,
         "overdue": overdue,
         "summary": {
@@ -184,7 +185,55 @@ def get_accountability():
             "neglected": f_neglected,
             "no_data": f_no_data,
         },
-    })
+    }
+
+    # Relationship intelligence — graceful degradation on error
+    try:
+        today = _date.today()
+        person_intel = get_person_intelligence(g, today)
+        all_fundamentals = check_fundamentals(g, today, include_active=True)
+        social_pattern = detect_social_patterns(person_intel, all_fundamentals, g, today)
+
+        # Classify each person by staleness
+        persons_with_staleness = []
+        r_active = 0
+        r_stale = 0
+        r_inactive = 0
+
+        for p in person_intel:
+            node = g.get_node(p["person_id"])
+            node_status = str((node.get("status") or "") if node else "").lower()
+
+            if node_status in ("inactive", "archived"):
+                staleness = "inactive"
+                r_inactive += 1
+            elif p.get("days_since_update") is not None and p["days_since_update"] <= 14:
+                staleness = "active"
+                r_active += 1
+            else:
+                staleness = "stale"
+                r_stale += 1
+
+            persons_with_staleness.append({**p, "staleness": staleness})
+
+        response_data["relationships"] = {
+            "persons": persons_with_staleness,
+            "social_pattern": {
+                "pattern": social_pattern.get("pattern", "no_data"),
+                "confidence": social_pattern.get("confidence", "low"),
+                "signals": social_pattern.get("signals", []),
+            },
+            "summary": {
+                "total_persons": len(person_intel),
+                "active": r_active,
+                "stale": r_stale,
+                "inactive": r_inactive,
+            },
+        }
+    except Exception:
+        logger.exception("Relationship service error — returning without relationships key")
+
+    return jsonify(response_data)
 
 
 @graph_bp.route("/api/graph/suggest-links", methods=["POST"])
