@@ -1638,3 +1638,282 @@ class TestNodeContextCompact:
         context, _ = agent.get_context("tell me about my goal")
         # Full format shows "Content:" label
         assert "Content:" in context
+
+
+# ── Relationship Alert Injection ──
+
+
+class TestRelationshipAlerts:
+    """Test _build_relationship_alerts() and its integration into _build_proactive_alerts()."""
+
+    def _agent(self):
+        from unittest.mock import MagicMock
+        schema = {"type_list": ["goal", "task", "habit", "person"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+        return agent
+
+    def _drifting(self, pid="ethan", title="Ethan Shorthouse", days=18, drift=4,
+                  rel="friend", freq="weekly", pos=5, neg=1, profile="mostly_positive"):
+        return {
+            "person_id": pid,
+            "person_title": title,
+            "relationship": rel,
+            "expected_frequency": freq,
+            "mention_count": 6,
+            "days_since_mention": days,
+            "drift_days": drift,
+            "health": "drifting",
+            "influence_score": 0.5,
+            "influence_rank": 2,
+            "context_profile": profile,
+            "mention_contexts": {"positive": pos, "negative": neg, "planning": 0, "neutral": 0},
+            "recent_topics": [],
+        }
+
+    def _neglected(self, pid="dad", title="Dad", days=30, drift=16):
+        return {
+            "person_id": pid,
+            "person_title": title,
+            "relationship": "family",
+            "expected_frequency": "weekly",
+            "mention_count": 2,
+            "days_since_mention": days,
+            "drift_days": drift,
+            "health": "neglected",
+            "influence_score": 0.2,
+            "influence_rank": 4,
+            "context_profile": "neutral",
+            "mention_contexts": {"positive": 0, "negative": 0, "planning": 0, "neutral": 2},
+            "recent_topics": [],
+        }
+
+    def _high_influence(self, pid="boss", title="Boss", count=8, profile="mostly_negative"):
+        return {
+            "person_id": pid,
+            "person_title": title,
+            "relationship": "colleague",
+            "expected_frequency": "weekly",
+            "mention_count": count,
+            "days_since_mention": 1,
+            "drift_days": 0,
+            "health": "active",
+            "influence_score": 0.8,
+            "influence_rank": 1,
+            "context_profile": profile,
+            "mention_contexts": {"positive": 0, "negative": count, "planning": 0, "neutral": 0},
+            "recent_topics": [],
+        }
+
+    def test_proactive_alerts_drifting_relationship(self):
+        """Drifting person appears in formatted output."""
+        agent = self._agent()
+        alerts = {"drifting_relationships": [self._drifting()], "neglected_relationships": [], "high_influence": []}
+        result = agent._build_proactive_alerts(alerts)
+        assert "RELATIONSHIP DRIFT" in result
+        assert "Ethan Shorthouse" in result
+        assert "18" in result  # days
+
+    def test_proactive_alerts_neglected_relationship(self):
+        """Neglected person appears with stronger framing."""
+        agent = self._agent()
+        alerts = {"drifting_relationships": [], "neglected_relationships": [self._neglected()], "high_influence": []}
+        result = agent._build_proactive_alerts(alerts)
+        assert "RELATIONSHIP DRIFT" in result
+        assert "Dad" in result
+        assert "guilt-trip" in result.lower() or "directly relevant" in result.lower()
+
+    def test_proactive_alerts_high_influence_negative(self):
+        """Person mentioned 8x in stress contexts → appears in alerts."""
+        agent = self._agent()
+        alerts = {
+            "drifting_relationships": [],
+            "neglected_relationships": [],
+            "high_influence": [self._high_influence(count=8, profile="mostly_negative")],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "HIGH INFLUENCE" in result
+        assert "Boss" in result
+
+    def test_proactive_alerts_high_influence_mixed_flagged(self):
+        """Mixed context profile also triggers high-influence alert."""
+        agent = self._agent()
+        alerts = {
+            "drifting_relationships": [],
+            "neglected_relationships": [],
+            "high_influence": [self._high_influence(count=7, profile="mixed")],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "HIGH INFLUENCE" in result
+
+    def test_proactive_alerts_high_influence_positive_not_flagged(self):
+        """Person mentioned 10x positively → NOT in alerts."""
+        agent = self._agent()
+        alerts = {
+            "drifting_relationships": [],
+            "neglected_relationships": [],
+            "high_influence": [self._high_influence(count=10, profile="mostly_positive")],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "HIGH INFLUENCE" not in result
+
+    def test_proactive_alerts_no_drift_no_output(self):
+        """All relationships active (no drifting/neglected/high_influence) → no relationship section."""
+        agent = self._agent()
+        alerts = {"drifting_relationships": [], "neglected_relationships": [], "high_influence": []}
+        result = agent._build_proactive_alerts(alerts)
+        assert result == ""
+
+    def test_proactive_alerts_relationship_cap(self):
+        """More than 2 drifting → only 2 shown."""
+        agent = self._agent()
+        drifting = [
+            self._drifting(f"person-{i}", f"Person {i}", days=20, drift=6)
+            for i in range(5)
+        ]
+        alerts = {"drifting_relationships": drifting, "neglected_relationships": [], "high_influence": []}
+        result = agent._build_proactive_alerts(alerts)
+        count = sum(1 for i in range(5) if f"Person {i}" in result)
+        assert count == 2
+
+    def test_proactive_alerts_relationship_suppressed_when_stressed(self):
+        """Elevated stress + medium confidence → relationship alerts suppressed."""
+        agent = self._agent()
+        alerts = {
+            "drifting_relationships": [self._drifting()],
+            "neglected_relationships": [],
+            "high_influence": [],
+            # Need other alerts to ensure total_cap kicks in
+            "broken_streaks": [
+                {"habit_id": f"h{i}", "habit_title": f"Habit {i}", "frequency": "daily",
+                 "status": "active", "current_streak": 0, "last_completed": "2026-01-01",
+                 "days_since_last": 30}
+                for i in range(2)
+            ],
+            "at_risk_streaks": [],
+            "overdue_commitments": [],
+        }
+        state = {"stress": "elevated", "energy": "low", "confidence": "medium", "signals": []}
+        result = agent._build_proactive_alerts(alerts, state=state)
+        assert "RELATIONSHIP DRIFT" not in result
+
+    def test_build_relationship_alerts_empty(self):
+        """No drifting/neglected/high_influence → empty string."""
+        result = MentorAgent._build_relationship_alerts([], [], [])
+        assert result == ""
+
+    def test_build_relationship_alerts_high_influence_below_threshold(self):
+        """High-influence but mention_count < 5 → not flagged."""
+        high = self._high_influence(count=3, profile="mostly_negative")
+        high["mention_count"] = 3
+        result = MentorAgent._build_relationship_alerts([], [], [high])
+        assert result == ""
+
+
+# ── Person Context Enrichment ──
+
+
+class TestPersonContextEnrichment:
+    """Test _node_context_full and _node_context_compact with relationship_stats."""
+
+    def _person_node(self, pid="ethan", title="Ethan Shorthouse", relationship="friend"):
+        return {"id": pid, "type": "person", "title": title, "relationship": relationship}
+
+    def _rel_stats(self, pid="ethan", count=7, days=3, health="active",
+                   profile="mostly_positive", pos=5, neg=1, plan=1):
+        return {
+            "person_id": pid,
+            "relationship": "friend",
+            "expected_frequency": "weekly",
+            "mention_count": count,
+            "days_since_mention": days,
+            "health": health,
+            "context_profile": profile,
+            "mention_contexts": {"positive": pos, "negative": neg, "planning": plan, "neutral": 0},
+        }
+
+    def test_person_context_full_enriched(self):
+        """Person node formatted with mention stats when relationship_stats provided."""
+        node = self._person_node()
+        stats = self._rel_stats()
+        result = _node_context_full(node, [], relationship_stats=stats)
+        assert "Mentions:" in result
+        assert "7 this month" in result
+        assert "3d ago" in result
+        assert "active" in result
+
+    def test_person_context_full_not_enriched_without_data(self):
+        """Person node formatted normally when no relationship_stats provided."""
+        node = self._person_node()
+        result = _node_context_full(node, [])
+        assert "Mentions:" not in result
+
+    def test_person_context_compact_enriched(self):
+        """Person compact format includes mention summary when stats provided."""
+        node = self._person_node()
+        stats = self._rel_stats(count=7, days=3)
+        result = _node_context_compact(node, [], relationship_stats=stats)
+        assert "Mentions:" in result
+        assert "7/month" in result
+        assert "3d ago" in result
+
+    def test_person_context_compact_not_enriched_without_data(self):
+        """Person compact format unchanged when no relationship_stats."""
+        node = self._person_node()
+        result = _node_context_compact(node, [])
+        assert "Mentions:" not in result
+
+    def test_non_person_node_not_enriched(self):
+        """Non-person node is not enriched even when relationship_stats provided."""
+        node = {"id": "goal-x", "type": "goal", "title": "My Goal"}
+        stats = self._rel_stats()
+        result = _node_context_full(node, [], relationship_stats=stats)
+        assert "Mentions:" not in result
+
+    def test_get_context_uses_relationship_data(self):
+        """get_context passes relationship_data to _retrieve for person nodes."""
+        from unittest.mock import MagicMock
+        from mentor_agent import _BOOTSTRAP_THRESHOLD
+        schema = {"type_list": ["goal", "task", "habit", "person"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+
+        person_node = self._person_node()
+        # Need enough nodes to avoid bootstrap mode
+        pad_nodes = [
+            {"id": f"pad-{i}", "type": "goal", "title": f"Pad Goal {i}"}
+            for i in range(_BOOTSTRAP_THRESHOLD + 1)
+        ]
+        all_nodes = [person_node] + pad_nodes
+        agent.graph.get_all_nodes.return_value = all_nodes
+
+        def get_node_side_effect(nid):
+            if nid == "ethan":
+                return person_node
+            for n in pad_nodes:
+                if n["id"] == nid:
+                    return n
+            return None
+
+        agent.graph.get_node.side_effect = get_node_side_effect
+        agent.vector_index.search.return_value = [
+            {"id": "ethan", "score": 0.9, "title": "Ethan Shorthouse", "type": "person"}
+        ]
+        agent.graph.get_neighbors.return_value = []
+        agent.graph.get_neighbors_by_hop.return_value = {}
+
+        rel_data = {"ethan": self._rel_stats()}
+        context, _ = agent.get_context("what about Ethan", relationship_data=rel_data)
+        assert "Mentions:" in context

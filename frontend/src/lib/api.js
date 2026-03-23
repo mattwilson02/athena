@@ -177,6 +177,12 @@ export function getAccountability() {
   return fetchJSON(`${BASE}/accountability`);
 }
 
+// --- Relationships ---
+
+export function getRelationships() {
+  return fetchJSON(`${BASE}/relationships`);
+}
+
 // --- Debug ---
 
 export function getRetrievalDiagnostics(query) {

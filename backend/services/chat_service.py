@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import anthropic
 
@@ -18,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 class ChatService:
     """Orchestrates chat flow: session → mentor → dedup → save."""
+
+    # Throttle relationship persistence to at most once per hour across all instances
+    _last_relationship_persist: float = 0.0
 
     def __init__(self, chat_store, mentor, graph, vector_index, vault_service=None):
         self.chat_store = chat_store
@@ -35,7 +39,7 @@ class ChatService:
             return []
 
     def _build_alerts(self) -> dict:
-        """Compute accountability alerts (broken streaks, overdue commitments, fundamentals)."""
+        """Compute accountability alerts (broken streaks, overdue commitments, fundamentals, relationships)."""
         try:
             from services.accountability_service import (
                 calculate_streaks, find_overdue_commitments, check_fundamentals,
@@ -43,7 +47,7 @@ class ChatService:
             streaks = calculate_streaks(self.graph)
             overdue = find_overdue_commitments(self.graph, date.today())
             fundamentals = check_fundamentals(self.graph, date.today())
-            return {
+            alerts = {
                 "broken_streaks": [s for s in streaks if s["streak_status"] == "broken"],
                 "at_risk_streaks": [s for s in streaks if s["streak_status"] == "at_risk"],
                 "overdue_commitments": overdue,
@@ -52,7 +56,40 @@ class ChatService:
             }
         except Exception:
             logger.exception("Accountability service failed — proceeding with empty alerts")
-            return {}
+            alerts = {}
+
+        try:
+            from services.relationship_service import scan_mentions, assess_relationship_health
+            mention_stats = scan_mentions(self.chat_store, self.graph)
+            relationships = assess_relationship_health(mention_stats, date.today())
+            alerts["drifting_relationships"] = [r for r in relationships if r["health"] == "drifting"]
+            alerts["neglected_relationships"] = [r for r in relationships if r["health"] == "neglected"]
+            alerts["high_influence"] = [
+                r for r in relationships
+                if r["influence_rank"] <= 3 and r["mention_count"] >= 5
+            ]
+            # Store by ID for person context enrichment in retrieval
+            alerts["_relationships_by_id"] = {r["person_id"]: r for r in relationships}
+            # Store full list for persistence throttle check
+            alerts["_all_relationships"] = relationships
+        except Exception:
+            logger.exception("Relationship service failed — proceeding without relationship alerts")
+
+        return alerts
+
+    def _maybe_persist_relationships(self, relationships: list[dict]) -> None:
+        """Persist mention stats to person nodes, throttled to at most once per hour."""
+        if not relationships or self.vault_service is None:
+            return
+        now = time.time()
+        if now - ChatService._last_relationship_persist < 3600:
+            return
+        try:
+            from services.relationship_service import persist_mention_stats
+            persist_mention_stats(self.vault_service, relationships, date.today())
+            ChatService._last_relationship_persist = now
+        except Exception:
+            logger.exception("Relationship persistence failed — non-critical, skipping")
 
     def _infer_state(self, session_id: str) -> dict:
         """Infer user state from the current session's recent messages."""
@@ -99,6 +136,9 @@ class ChatService:
         except Exception:
             logger.exception("Alert computation failed — proceeding with empty alerts")
             alerts = {}
+
+        # Persist relationship mention stats (throttled)
+        self._maybe_persist_relationships(alerts.get("_all_relationships", []))
 
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
@@ -183,6 +223,9 @@ class ChatService:
         except Exception:
             logger.exception("Alert computation failed — proceeding with empty alerts")
             alerts = {}
+
+        # Persist relationship mention stats (throttled)
+        self._maybe_persist_relationships(alerts.get("_all_relationships", []))
 
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)

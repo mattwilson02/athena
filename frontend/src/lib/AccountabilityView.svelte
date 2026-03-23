@@ -166,6 +166,33 @@
       {/if}
     </section>
 
+    <!-- Relationships summary section -->
+    {#if data.relationships_summary}
+      <section class="section">
+        <div class="section-header">
+          <h3 class="section-title">Relationships</h3>
+          <div class="fundamentals-summary">
+            <span class="fund-stat active">{data.relationships_summary.active} active</span>
+            {#if data.relationships_summary.drifting > 0}
+              <span class="fund-stat at-risk">{data.relationships_summary.drifting} drifting</span>
+            {/if}
+            {#if data.relationships_summary.neglected > 0}
+              <span class="fund-stat neglected">{data.relationships_summary.neglected} neglected</span>
+            {/if}
+            {#if data.relationships_summary.no_data > 0}
+              <span class="fund-stat no-data">{data.relationships_summary.no_data} untracked</span>
+            {/if}
+          </div>
+        </div>
+        <div class="relationships-footer">
+          <span class="rel-total">{data.relationships_summary.total_persons} people tracked</span>
+          {#if data.relationships_summary.most_mentioned}
+            <span class="rel-most-mentioned">Most mentioned: {data.relationships_summary.most_mentioned}</span>
+          {/if}
+        </div>
+      </section>
+    {/if}
+
     <!-- Fundamentals section -->
     {#if data.fundamentals && data.fundamentals.length > 0}
       <section class="section">
@@ -505,6 +532,11 @@
     color: var(--success);
   }
 
+  .fund-stat.at-risk {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+
   .fund-stat.neglected {
     background: var(--error-soft);
     color: var(--error);
@@ -513,6 +545,20 @@
   .fund-stat.no-data {
     background: var(--bg-surface-hover);
     color: var(--text-muted);
+  }
+
+  /* Relationships summary footer */
+  .relationships-footer {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    padding: var(--space-xs) 0;
+  }
+
+  .rel-most-mentioned {
+    color: var(--text-secondary);
   }
 
   .fundamentals-grid {

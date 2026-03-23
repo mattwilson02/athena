@@ -750,3 +750,185 @@ class TestDebugRetrievalRoute:
         assert resp.status_code == 400
         data = resp.get_json()
         assert "error" in data
+
+
+# ── Relationship Routes ───────────────────────────────────────────────────
+
+
+class TestRelationshipRoutes:
+    """Tests for GET /api/relationships and extended /api/accountability."""
+
+    def test_accountability_includes_relationships_summary(self, client):
+        """GET /api/accountability response includes 'relationships_summary' key."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "relationships_summary" in data
+
+    def test_accountability_relationships_summary_structure(self, client):
+        """relationships_summary has required keys."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        rs = resp.get_json()["relationships_summary"]
+        assert "total_persons" in rs
+        assert "active" in rs
+        assert "drifting" in rs
+        assert "neglected" in rs
+        assert "no_data" in rs
+        assert "most_mentioned" in rs
+
+    def test_relationships_endpoint_returns_data(self, client):
+        """GET /api/relationships → 200 with relationships array."""
+        resp = client.get("/api/relationships")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "relationships" in data
+        assert "summary" in data
+        assert isinstance(data["relationships"], list)
+
+    def test_relationships_endpoint_empty_graph(self, client):
+        """No person nodes → empty array, zero counts."""
+        # Test graph has one person node (alice), so we patch to empty
+        from unittest.mock import patch
+        with patch(
+            "routes.graph_routes.scan_mentions",
+            return_value=[],
+        ):
+            with patch(
+                "routes.graph_routes.assess_relationship_health",
+                return_value=[],
+            ):
+                resp = client.get("/api/relationships")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["relationships"] == []
+        summary = data["summary"]
+        assert summary["total_persons"] == 0
+        assert summary["active"] == 0
+        assert summary["drifting"] == 0
+        assert summary["neglected"] == 0
+
+    def test_relationships_endpoint_summary_counts_match(self, client):
+        """summary counts match the relationships array."""
+        resp = client.get("/api/relationships")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        rels = data["relationships"]
+        summary = data["summary"]
+        assert summary["total_persons"] == len(rels)
+        computed_active = sum(1 for r in rels if r["health"] == "active")
+        computed_drifting = sum(1 for r in rels if r["health"] == "drifting")
+        computed_neglected = sum(1 for r in rels if r["health"] == "neglected")
+        computed_no_data = sum(1 for r in rels if r["health"] == "no_data")
+        assert summary["active"] == computed_active
+        assert summary["drifting"] == computed_drifting
+        assert summary["neglected"] == computed_neglected
+        assert summary["no_data"] == computed_no_data
+
+    def test_relationships_endpoint_sorted_by_health(self, client):
+        """Neglected persons appear before active in sorted results."""
+        from unittest.mock import patch
+        from datetime import date
+
+        rels = [
+            {
+                "person_id": "alice", "person_title": "Alice", "relationship": "friend",
+                "expected_frequency": "weekly", "mention_count": 3,
+                "last_mentioned": "2026-01-01", "days_since_mention": 80,
+                "health": "neglected", "drift_days": 52, "influence_score": 0.3,
+                "influence_rank": 2, "context_profile": "neutral",
+                "mention_contexts": {"positive": 0, "negative": 0, "planning": 0, "neutral": 3},
+                "recent_topics": [],
+            },
+            {
+                "person_id": "bob", "person_title": "Bob", "relationship": "friend",
+                "expected_frequency": "weekly", "mention_count": 10,
+                "last_mentioned": "2026-03-22", "days_since_mention": 1,
+                "health": "active", "drift_days": 0, "influence_score": 1.0,
+                "influence_rank": 1, "context_profile": "mostly_positive",
+                "mention_contexts": {"positive": 8, "negative": 1, "planning": 1, "neutral": 0},
+                "recent_topics": [],
+            },
+        ]
+
+        with patch("routes.graph_routes.scan_mentions", return_value=[]):
+            with patch("routes.graph_routes.assess_relationship_health", return_value=rels):
+                resp = client.get("/api/relationships")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        result_rels = data["relationships"]
+        # neglected should come first
+        assert result_rels[0]["health"] == "neglected"
+        assert result_rels[1]["health"] == "active"
+
+    def test_relationships_endpoint_error_handling(self, client):
+        """scan_mentions raises → 500 response."""
+        from unittest.mock import patch
+        with patch(
+            "routes.graph_routes.scan_mentions",
+            side_effect=RuntimeError("service exploded"),
+        ):
+            resp = client.get("/api/relationships")
+        assert resp.status_code == 500
+        data = resp.get_json()
+        assert "error" in data
+
+    def test_relationship_error_doesnt_break_chat(self, client):
+        """Mock relationship service to raise → chat proceeds normally."""
+        from unittest.mock import patch
+
+        create_resp = client.post("/api/chat/sessions")
+        sid = create_resp.get_json()["id"]
+
+        with patch(
+            "services.relationship_service.scan_mentions",
+            side_effect=RuntimeError("relationship service exploded"),
+        ):
+            resp = client.post("/api/chat", json={
+                "session_id": sid,
+                "message": "Hello Athena",
+            })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "response" in data
+
+
+class TestRelationshipPersistenceThrottle:
+    """Test that relationship persistence is throttled."""
+
+    def test_relationship_persist_throttled(self, client):
+        """Two messages within 1 hour → persistence runs at most once."""
+        from unittest.mock import patch
+        from services.chat_service import ChatService
+
+        # Reset the throttle timestamp
+        ChatService._last_relationship_persist = 0.0
+
+        create_resp = client.post("/api/chat/sessions")
+        sid = create_resp.get_json()["id"]
+
+        persist_calls = []
+
+        def mock_persist(vault_service, relationships, today):
+            persist_calls.append(1)
+            return len(relationships)
+
+        with patch(
+            "services.relationship_service.persist_mention_stats",
+            side_effect=mock_persist,
+        ):
+            with patch(
+                "services.relationship_service.scan_mentions",
+                return_value=[],
+            ):
+                with patch(
+                    "services.relationship_service.assess_relationship_health",
+                    return_value=[],
+                ):
+                    # First message
+                    client.post("/api/chat", json={"session_id": sid, "message": "msg 1"})
+                    # Second message (same hour)
+                    client.post("/api/chat", json={"session_id": sid, "message": "msg 2"})
+
+        # Persistence should have run at most once
+        assert len(persist_calls) <= 1

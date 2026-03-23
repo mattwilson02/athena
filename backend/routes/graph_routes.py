@@ -12,6 +12,7 @@ import anthropic
 from flask import Blueprint, current_app, jsonify, request
 
 from services.accountability_service import calculate_streaks, find_overdue_commitments, check_fundamentals
+from services.relationship_service import scan_mentions, assess_relationship_health
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,40 @@ def get_accountability():
     f_neglected = sum(1 for f in fundamentals if f["status"] == "neglected")
     f_no_data = sum(1 for f in fundamentals if f["status"] == "no_data")
 
+    # Relationships summary (best-effort — non-fatal on error)
+    relationships_summary: dict = {
+        "total_persons": 0,
+        "active": 0,
+        "drifting": 0,
+        "neglected": 0,
+        "no_data": 0,
+        "most_mentioned": None,
+    }
+    try:
+        chat_store = current_app.config.get("chat_store")
+        if chat_store is not None:
+            mention_stats = scan_mentions(chat_store, g)
+            relationships = assess_relationship_health(mention_stats, _date.today())
+            r_active = sum(1 for r in relationships if r["health"] == "active")
+            r_drifting = sum(1 for r in relationships if r["health"] == "drifting")
+            r_neglected = sum(1 for r in relationships if r["health"] == "neglected")
+            r_no_data = sum(1 for r in relationships if r["health"] == "no_data")
+            most_mentioned = None
+            if relationships:
+                top = max(relationships, key=lambda r: r["mention_count"])
+                if top["mention_count"] > 0:
+                    most_mentioned = top["person_id"]
+            relationships_summary = {
+                "total_persons": len(relationships),
+                "active": r_active,
+                "drifting": r_drifting,
+                "neglected": r_neglected,
+                "no_data": r_no_data,
+                "most_mentioned": most_mentioned,
+            }
+    except Exception:
+        logger.exception("Relationship summary failed — returning empty summary")
+
     return jsonify({
         "streaks": streaks,
         "overdue": overdue,
@@ -184,7 +219,60 @@ def get_accountability():
             "neglected": f_neglected,
             "no_data": f_no_data,
         },
+        "relationships_summary": relationships_summary,
     })
+
+
+@graph_bp.route("/api/relationships", methods=["GET"])
+def get_relationships():
+    """Return full relationship health data for all person nodes."""
+    g = current_app.config["graph"]
+    chat_store = current_app.config.get("chat_store")
+    if chat_store is None:
+        return jsonify({"error": "Chat store not configured"}), 503
+
+    try:
+        mention_stats = scan_mentions(chat_store, g)
+        relationships = assess_relationship_health(mention_stats, _date.today())
+    except Exception:
+        logger.exception("Relationship service error")
+        return jsonify({"error": "Failed to compute relationship data"}), 500
+
+    # Sort: neglected first, then drifting, then active/no_data; within tier by influence desc
+    _health_order = {"neglected": 0, "drifting": 1, "active": 2, "no_data": 3}
+    relationships.sort(
+        key=lambda r: (_health_order.get(r["health"], 3), -r.get("influence_score", 0))
+    )
+
+    # Build summary
+    r_active = sum(1 for r in relationships if r["health"] == "active")
+    r_drifting = sum(1 for r in relationships if r["health"] == "drifting")
+    r_neglected = sum(1 for r in relationships if r["health"] == "neglected")
+    r_no_data = sum(1 for r in relationships if r["health"] == "no_data")
+
+    most_mentioned = None
+    if relationships:
+        top = max(relationships, key=lambda r: r["mention_count"])
+        if top["mention_count"] > 0:
+            most_mentioned = top["person_id"]
+
+    highest_influence = [
+        r["person_id"]
+        for r in sorted(relationships, key=lambda r: r["influence_score"], reverse=True)
+        if r["mention_count"] > 0
+    ][:3]
+
+    summary = {
+        "total_persons": len(relationships),
+        "active": r_active,
+        "drifting": r_drifting,
+        "neglected": r_neglected,
+        "no_data": r_no_data,
+        "most_mentioned": most_mentioned,
+        "highest_influence": highest_influence,
+    }
+
+    return jsonify({"relationships": relationships, "summary": summary})
 
 
 @graph_bp.route("/api/debug/retrieval", methods=["GET"])

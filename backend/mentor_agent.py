@@ -711,7 +711,11 @@ def _format_date_context(node: dict, today: date | None = None) -> str:
     return "\n".join(lines)
 
 
-def _node_context_full(node: dict, neighbor_names: list[str]) -> str:
+def _node_context_full(
+    node: dict,
+    neighbor_names: list[str],
+    relationship_stats: dict | None = None,
+) -> str:
     """Full context string for a direct-match node."""
     parts = [
         f"--- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) ---",
@@ -732,6 +736,27 @@ def _node_context_full(node: dict, neighbor_names: list[str]) -> str:
     content = node.get("content", "").strip()
     if content:
         parts.append(f"Content:\n{content}")
+
+    # Person-node enrichment with mention stats
+    if relationship_stats is not None and node.get("type") == "person":
+        rs = relationship_stats
+        rel_type = rs.get("relationship") or node.get("relationship", "")
+        freq = rs.get("expected_frequency") or ""
+        count = rs.get("mention_count", 0)
+        ctx = rs.get("mention_contexts", {})
+        pos = ctx.get("positive", 0)
+        neg = ctx.get("negative", 0)
+        plan = ctx.get("planning", 0)
+        days = rs.get("days_since_mention")
+        health = rs.get("health", "")
+        freq_str = f", {freq}" if freq else ""
+        days_str = f"{days}d ago" if days is not None else "unknown"
+        mentions_str = f"{count} this month ({pos} positive, {neg} negative, {plan} planning)"
+        parts.append(
+            f"[person] {node.get('title', node['id'])} ({rel_type}{freq_str})\n"
+            f"  Mentions: {mentions_str} | Last: {days_str} | Health: {health}"
+        )
+
     return "\n".join(parts)
 
 
@@ -765,7 +790,11 @@ def _node_context_minimal(node: dict) -> str:
     return f"- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) [ID: {node['id']}]"
 
 
-def _node_context_compact(node: dict, neighbor_names: list[str]) -> str:
+def _node_context_compact(
+    node: dict,
+    neighbor_names: list[str],
+    relationship_stats: dict | None = None,
+) -> str:
     """Compact context for broad-query Tier 1 — ~150-200 chars per node.
 
     Shows: title/type/status, one key date, neighbour count, first sentence.
@@ -806,6 +835,15 @@ def _node_context_compact(node: dict, neighbor_names: list[str]) -> str:
         parts.append(detail_line)
     if first_sentence:
         parts.append(f"  {first_sentence}")
+
+    # Person-node enrichment with mention stats (compact)
+    if relationship_stats is not None and node.get("type") == "person":
+        rs = relationship_stats
+        count = rs.get("mention_count", 0)
+        days = rs.get("days_since_mention")
+        days_str = f"{days}d" if days is not None else "unknown"
+        parts.append(f"  | Mentions: {count}/month, last {days_str} ago")
+
     return "\n".join(parts)
 
 
@@ -983,7 +1021,12 @@ class MentorAgent:
         self.model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
         logger.info(f"System prompt built from schema ({len(self.system_prompt_template)} chars)")
 
-    def _retrieve(self, query: str, conversation_history: list[dict] | None = None) -> dict:
+    def _retrieve(
+        self,
+        query: str,
+        conversation_history: list[dict] | None = None,
+        relationship_data: dict | None = None,
+    ) -> dict:
         """Run the full retrieval pipeline and return a rich result dict.
 
         Called by both get_context() and get_context_debug(). Always collects
@@ -1316,10 +1359,15 @@ class MentorAgent:
                 continue
             neighbors = self.graph.get_neighbors(result["id"], depth=1)
             neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
+            rel_stats = (
+                relationship_data.get(result["id"])
+                if relationship_data and node.get("type") == "person"
+                else None
+            )
             if compact:
-                block = _node_context_compact(node, neighbor_names)
+                block = _node_context_compact(node, neighbor_names, relationship_stats=rel_stats)
             else:
-                block = _node_context_full(node, neighbor_names)
+                block = _node_context_full(node, neighbor_names, relationship_stats=rel_stats)
 
             if chars_used + len(block) > char_budget:
                 break
@@ -1382,15 +1430,23 @@ class MentorAgent:
             "context_length_chars": chars_used,
         }
 
-    def get_context(self, query: str, conversation_history: list[dict] | None = None) -> tuple[str, list[dict]]:
+    def get_context(
+        self,
+        query: str,
+        conversation_history: list[dict] | None = None,
+        relationship_data: dict | None = None,
+    ) -> tuple[str, list[dict]]:
         """Hybrid retrieval: semantic search + domain filtering + 2-hop traversal + tiered assembly.
 
         If conversation_history is provided, recent user messages boost relevance of
         nodes mentioned in the ongoing conversation.
 
+        If relationship_data is provided (keyed by person_id), person nodes in
+        the assembled context are enriched with mention stats.
+
         Returns (context_string, search_results).
         """
-        result = self._retrieve(query, conversation_history)
+        result = self._retrieve(query, conversation_history, relationship_data=relationship_data)
         return result["context"], result["top_results"]
 
     def get_context_debug(self, query: str, conversation_history: list[dict] | None = None) -> dict:
@@ -1580,6 +1636,83 @@ class MentorAgent:
         return "\n".join(lines)
 
     @staticmethod
+    def _build_relationship_alerts(
+        drifting: list[dict],
+        neglected: list[dict],
+        high_influence: list[dict],
+    ) -> str:
+        """Build the RELATIONSHIP DRIFT and HIGH INFLUENCE alert sections.
+
+        Caps at 2 drifting/neglected combined + 1 high-influence.
+        High-influence only fires for mostly_negative or mixed context profiles.
+        Returns empty string if nothing to surface.
+        """
+        # Combine drifting + neglected (drifting first) and cap at 2
+        all_drift = (list(drifting) + list(neglected))[:2]
+
+        # Only flag high-influence persons with concerning context profiles
+        concerning_influence = [
+            r for r in high_influence
+            if r.get("context_profile") in ("mostly_negative", "mixed")
+            and r.get("mention_count", 0) >= 5
+        ][:1]
+
+        if not all_drift and not concerning_influence:
+            return ""
+
+        lines: list[str] = []
+
+        if all_drift:
+            lines.append("\nRELATIONSHIP DRIFT — these people may be falling out of touch:")
+            for r in all_drift:
+                title = r.get("person_title", r["person_id"])
+                rel = r.get("relationship") or "person"
+                freq = r.get("expected_frequency") or "unknown"
+                days = r.get("days_since_mention", 0) or 0
+                drift = r.get("drift_days", 0)
+                ctx = r.get("mention_contexts", {})
+                pos = ctx.get("positive", 0)
+                neg = ctx.get("negative", 0)
+                health = r.get("health", "drifting")
+
+                line = (
+                    f'- "{title}" ({rel}, expected: {freq}) — '
+                    f'last mentioned {days} day{"s" if days != 1 else ""} ago, '
+                    f'{drift} day{"s" if drift != 1 else ""} past expected.'
+                )
+                lines.append(line)
+
+                if health == "neglected":
+                    lines.append(
+                        "  Only raise if directly relevant to what the user is discussing. Don't guilt-trip."
+                    )
+                else:
+                    if pos > 0 or neg > 0:
+                        profile = r.get("context_profile", "neutral").replace("_", " ")
+                        lines.append(
+                            f"  Normally a {profile} relationship ({pos} positive, {neg} negative mentions this month)."
+                        )
+                    lines.append(
+                        "  Surface this gently when the user mentions anything social. Don't nag."
+                    )
+
+        if concerning_influence:
+            lines.append("\nHIGH INFLUENCE — the people on the user's mind most:")
+            for r in concerning_influence:
+                title = r.get("person_title", r["person_id"])
+                count = r.get("mention_count", 0)
+                profile = r.get("context_profile", "neutral").replace("_", " ")
+                lines.append(
+                    f'- "{title}" mentioned {count} time{"s" if count != 1 else ""} this month '
+                    f"(mostly in {profile} contexts) — may be worth exploring."
+                )
+                lines.append(
+                    "  The user keeps bringing this person up. Consider exploring the dynamic when relevant."
+                )
+
+        return "\n".join(lines)
+
+    @staticmethod
     def _build_proactive_alerts(alerts: dict, state: dict | None = None) -> str:
         """Build the PROACTIVE ALERTS injection for the system prompt.
 
@@ -1592,6 +1725,9 @@ class MentorAgent:
         overdue = alerts.get("overdue_commitments", [])[:3]
         neglected = alerts.get("neglected_fundamentals", [])[:3]
         untracked = alerts.get("untracked_fundamentals", [])[:2]
+        drifting_rels = alerts.get("drifting_relationships", [])[:2]
+        neglected_rels = alerts.get("neglected_relationships", [])[:2]
+        high_influence = alerts.get("high_influence", [])[:3]
 
         # State-aware suppression
         _state = state or {}
@@ -1618,13 +1754,30 @@ class MentorAgent:
             if stress == "elevated":
                 neglected = []
                 untracked = []
+                drifting_rels = []
+                neglected_rels = []
+                high_influence = []
             else:
                 remaining = max(0, total_cap - len(overdue) - len(broken) - len(at_risk))
                 neglected = neglected[:remaining]
                 remaining = max(0, remaining - len(neglected))
                 untracked = untracked[:remaining]
+                remaining = max(0, remaining - len(untracked))
+                drifting_rels = drifting_rels[:remaining]
+                remaining = max(0, remaining - len(drifting_rels))
+                neglected_rels = neglected_rels[:remaining]
+                remaining = max(0, remaining - len(neglected_rels))
+                high_influence = high_influence[:remaining]
 
-        if not broken and not at_risk and not overdue and not neglected and not untracked:
+        rel_section = MentorAgent._build_relationship_alerts(
+            drifting_rels, neglected_rels, high_influence
+        )
+
+        if (
+            not broken and not at_risk and not overdue
+            and not neglected and not untracked
+            and not rel_section
+        ):
             return ""
 
         lines = [
@@ -1696,6 +1849,9 @@ class MentorAgent:
                 name = f["fundamental"].replace("_", " ").title()
                 lines.append(f"- {name} — consider suggesting a {name.lower()}-related habit.")
 
+        if rel_section:
+            lines.append(rel_section)
+
         return "\n".join(lines)
 
     def chat_stream(self, message: str, conversation_history: list[dict],
@@ -1711,7 +1867,10 @@ class MentorAgent:
           ("text", {"content": str})  — streamed text token
           ("done", {response, full_response, graph_updates, relevant_nodes})
         """
-        context, search_results = self.get_context(message, conversation_history)
+        relationship_data = (alerts or {}).get("_relationships_by_id")
+        context, search_results = self.get_context(
+            message, conversation_history, relationship_data=relationship_data
+        )
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
@@ -1808,7 +1967,10 @@ class MentorAgent:
         alerts: proactive accountability alerts (broken streaks, overdue commitments).
         state: inferred user state (energy, stress, confidence) from recent messages.
         """
-        context, search_results = self.get_context(message, conversation_history)
+        relationship_data = (alerts or {}).get("_relationships_by_id")
+        context, search_results = self.get_context(
+            message, conversation_history, relationship_data=relationship_data
+        )
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
