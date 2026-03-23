@@ -156,6 +156,9 @@
     <button class:active={currentView === 'timeline'} onclick={() => onViewChange('timeline')}>
       Activity
     </button>
+    <button class:active={currentView === 'accountability'} onclick={() => onViewChange('accountability')}>
+      Track
+    </button>
   </nav>
 
   {#if currentView === 'chat'}

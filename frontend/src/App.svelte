@@ -5,6 +5,7 @@
   import GraphView from './lib/GraphView.svelte';
   import SearchModal from './lib/SearchModal.svelte';
   import TimelineView from './lib/TimelineView.svelte';
+  import AccountabilityView from './lib/AccountabilityView.svelte';
 
   let currentView = $state('chat');
   let currentSessionId = $state(null);
@@ -134,6 +135,8 @@
       <GraphView {schema} filter={graphFilter} selectedNode={selectedGraphNode} />
     {:else if currentView === 'timeline'}
       <TimelineView onNodeSelect={handleNodeSelect} />
+    {:else if currentView === 'accountability'}
+      <AccountabilityView />
     {/if}
   </div>
 </div>

@@ -6,7 +6,7 @@ import logging
 
 import anthropic
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from mentor_agent import classify_mode, _get_permanence
 from services.conflict_service import detect_conflicts
@@ -33,6 +33,21 @@ class ChatService:
             logger.exception("Conflict detection failed")
             return []
 
+    def _build_alerts(self) -> dict:
+        """Compute accountability alerts (broken streaks, overdue commitments)."""
+        try:
+            from services.accountability_service import calculate_streaks, find_overdue_commitments
+            streaks = calculate_streaks(self.graph)
+            overdue = find_overdue_commitments(self.graph, date.today())
+            return {
+                "broken_streaks": [s for s in streaks if s["streak_status"] == "broken"],
+                "at_risk_streaks": [s for s in streaks if s["streak_status"] == "at_risk"],
+                "overdue_commitments": overdue,
+            }
+        except Exception:
+            logger.exception("Accountability service failed — proceeding with empty alerts")
+            return {}
+
     def send_message(self, session_id: str, message: str) -> dict:
         """Process a user message. Returns {response, graph_updates, relevant_nodes, conflicts} or {error}."""
         if self.mentor is None:
@@ -57,6 +72,13 @@ class ChatService:
         # Get active challenge state for system prompt injection
         challenges = self.chat_store.get_active_challenges(session_id)
 
+        # Build accountability alerts for proactive injection (defensive — never breaks chat)
+        try:
+            alerts = self._build_alerts()
+        except Exception:
+            logger.exception("Alert computation failed — proceeding with empty alerts")
+            alerts = {}
+
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
 
@@ -65,7 +87,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -82,11 +104,12 @@ class ChatService:
             logger.error("Network error reaching Claude API")
             return {"error": "Can't reach Claude right now. Check your connection.", "status": 503}
 
-        # Post-process: dedup check + supersession validation + challenge ladder + permanence warnings
+        # Post-process: dedup check + supersession validation + challenge ladder + permanence warnings + commitment enrichment
         graph_updates = self._dedup_check(result["graph_updates"])
         graph_updates = self._validate_supersession(graph_updates)
         graph_updates = self._check_challenge_triggers(session_id, graph_updates)
         graph_updates = self._annotate_permanence_warnings(graph_updates)
+        graph_updates = self._enrich_commitment_metadata(graph_updates)
 
         # Save assistant message
         self.chat_store.append_message(session_id, {
@@ -130,12 +153,19 @@ class ChatService:
         # Get active challenge state for system prompt injection
         challenges = self.chat_store.get_active_challenges(session_id)
 
+        # Build accountability alerts for proactive injection (defensive — never breaks chat)
+        try:
+            alerts = self._build_alerts()
+        except Exception:
+            logger.exception("Alert computation failed — proceeding with empty alerts")
+            alerts = {}
+
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":
@@ -143,6 +173,7 @@ class ChatService:
                     graph_updates = self._validate_supersession(graph_updates)
                     graph_updates = self._check_challenge_triggers(session_id, graph_updates)
                     graph_updates = self._annotate_permanence_warnings(graph_updates)
+                    graph_updates = self._enrich_commitment_metadata(graph_updates)
                     self.chat_store.append_message(session_id, {
                         "role": "assistant",
                         "content": data["full_response"],
@@ -472,6 +503,45 @@ class ChatService:
             warning = _PERMANENCE_WARNINGS.get(level)
             if warning:
                 update["permanence_warning"] = warning
+        return updates
+
+    def _enrich_commitment_metadata(self, updates: list[dict]) -> list[dict]:
+        """Validate and normalise commitment fields on graph updates.
+
+        For each update with `committed_on` in frontmatter:
+        - Validate it's a parseable ISO date; strip it if not.
+        - Ensure `commitment_context` exists (default to empty string if absent).
+        """
+        from datetime import datetime as _dt
+        for update in updates:
+            # Normalise frontmatter location based on action.
+            if update.get("action") == "create":
+                fm = update.get("frontmatter", {})
+            elif update.get("action") == "update":
+                fm = update.get("changes", {}).get("frontmatter", {})
+            else:
+                continue
+
+            if not isinstance(fm, dict):
+                continue
+
+            committed_on = fm.get("committed_on")
+            if committed_on is None:
+                continue
+
+            # Validate the date string.
+            try:
+                _dt.fromisoformat(str(committed_on).split("T")[0])
+            except (ValueError, TypeError):
+                # Invalid date — strip it.
+                del fm["committed_on"]
+                fm.pop("commitment_context", None)
+                continue
+
+            # Ensure commitment_context exists.
+            if "commitment_context" not in fm:
+                fm["commitment_context"] = ""
+
         return updates
 
     def _validate_supersession(self, updates: list[dict]) -> list[dict]:
