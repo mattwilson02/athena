@@ -7,6 +7,7 @@
   import TimelineView from './lib/TimelineView.svelte';
   import AccountabilityView from './lib/AccountabilityView.svelte';
   import RelationshipsView from './lib/RelationshipsView.svelte';
+  import CreateNodeModal from './lib/CreateNodeModal.svelte';
 
   let currentView = $state('chat');
   let currentSessionId = $state(null);
@@ -16,6 +17,7 @@
   let selectedGraphNode = $state(null);
   let connectionError = $state(false);
   let showSearch = $state(false);
+  let showCreateNode = $state(false);
   let nodeMap = $state({});
 
   async function loadSessions() {
@@ -105,6 +107,14 @@
   <SearchModal onSelect={handleSearchSelect} onClose={() => showSearch = false} />
 {/if}
 
+{#if showCreateNode}
+  <CreateNodeModal
+    {schema}
+    onClose={() => showCreateNode = false}
+    onCreated={(nodeId) => { loadNodeMap(); showCreateNode = false; }}
+  />
+{/if}
+
 {#if connectionError}
   <div class="error-banner">
     Backend not reachable. Check the server is running and your auth token is set.
@@ -123,6 +133,7 @@
     {schema}
     {graphFilter}
     onFilterChange={handleFilterChange}
+    onCreateNode={() => showCreateNode = true}
   />
   <div class="main-content">
     {#if currentView === 'chat'}
@@ -133,7 +144,7 @@
         {nodeMap}
       />
     {:else if currentView === 'graph'}
-      <GraphView {schema} filter={graphFilter} selectedNode={selectedGraphNode} />
+      <GraphView {schema} filter={graphFilter} selectedNode={selectedGraphNode} onNodeDelete={() => loadNodeMap()} />
     {:else if currentView === 'timeline'}
       <TimelineView onNodeSelect={handleNodeSelect} />
     {:else if currentView === 'accountability'}

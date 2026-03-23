@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import threading
 from pathlib import Path
 
@@ -230,6 +231,46 @@ class VaultService:
         else:
             stats = self.rebuild_fn()
         return {"ok": True, "node_id": node_id, "stats": stats}
+
+    def delete(self, node_id: str) -> dict:
+        """Archive a node to _backup/. Returns {ok, node_id, archived_to, stats} or {error}."""
+        with self.lock:
+            return self._delete_locked(node_id)
+
+    def _delete_locked(self, node_id: str) -> dict:
+        if not node_id:
+            return {"error": "node_id is required", "status": 400}
+
+        node_id = _sanitize_id(node_id)
+        if not node_id:
+            return {"error": "node_id is empty after sanitization", "status": 400}
+
+        node = self.graph.get_node(node_id)
+        if node is None:
+            return {"error": f"Node '{node_id}' not found", "status": 404}
+
+        relative_path = node["filepath"]  # e.g., "Self/Goals/learn-piano.md"
+        filepath = os.path.join(self.vault_path, relative_path)
+        if not os.path.isfile(filepath):
+            return {"error": f"File not found for node '{node_id}'", "status": 404}
+
+        # Move file to _backup/, preserving subdirectory structure
+        backup_path = Path(self.vault_path) / "_backup" / relative_path
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(filepath, str(backup_path))
+
+        # Full rebuild to clear the node and its edges from the graph
+        stats = self.rebuild_fn()
+
+        # Remove from vector index
+        self.vector_index.delete_one(node_id)
+
+        return {
+            "ok": True,
+            "node_id": node_id,
+            "archived_to": str(Path("_backup") / relative_path),
+            "stats": stats,
+        }
 
     def repair(self) -> dict:
         """Fix duplicate sections and heading issues across all vault files."""

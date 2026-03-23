@@ -134,10 +134,64 @@
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 150) + 'px';
   }
+
+  // ── Wikilink click delegation ──
+  function handleMessagesClick(e) {
+    if (e.target.classList.contains('fmt-wikilink')) {
+      e.preventDefault();
+      const nodeId = e.target.dataset.nodeId;
+      if (nodeId) onNodeSelect(nodeId);
+    }
+  }
+
+  // ── Batch accept ──
+  function getUpdateKey(u) {
+    return u.node_id || u.source || `${u.action}-${u.title}`;
+  }
+
+  function isPendingNonDuplicate(u) {
+    return !u._alreadyInVault && !u._dismissed && !(u._duplicate && u._duplicate.match !== 'none');
+  }
+
+  // batchState: { msgRef, queue, currentIdx } | null
+  let batchState = $state(null);
+
+  function pendingCount(updates) {
+    return updates.filter(isPendingNonDuplicate).length;
+  }
+
+  function startBatchAccept(msgUpdates) {
+    const pending = msgUpdates.filter(isPendingNonDuplicate);
+    if (pending.length < 2) return;
+    batchState = { msgRef: msgUpdates, queue: pending, currentIdx: 0 };
+  }
+
+  function isBatchCurrent(msgUpdates, update) {
+    if (!batchState || batchState.msgRef !== msgUpdates) return false;
+    return batchState.queue[batchState.currentIdx] === update;
+  }
+
+  function onBatchCardAccepted(msgUpdates, update) {
+    if (!batchState || batchState.msgRef !== msgUpdates) return;
+    if (batchState.queue[batchState.currentIdx] !== update) return;
+    update._alreadyInVault = true;
+    const nextIdx = batchState.currentIdx + 1;
+    if (nextIdx >= batchState.queue.length) {
+      batchState = null;
+    } else {
+      batchState = { ...batchState, currentIdx: nextIdx };
+    }
+  }
+
+  function batchProgress(msgUpdates) {
+    if (!batchState || batchState.msgRef !== msgUpdates) return null;
+    return { current: batchState.currentIdx + 1, total: batchState.queue.length };
+  }
 </script>
 
 <div class="chat-view">
-  <div class="messages" bind:this={messagesContainer}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="messages" bind:this={messagesContainer} onclick={handleMessagesClick}>
     {#if messages.length === 0 && !isLoading}
       <div class="empty-state">
         <div class="empty-avatar">A</div>
@@ -190,8 +244,24 @@
 
         {#if msg.graphUpdates?.length > 0}
           <div class="graph-updates">
+            {#if pendingCount(msg.graphUpdates) >= 2}
+              {@const progress = batchProgress(msg.graphUpdates)}
+              <button
+                class="btn-accept-all"
+                onclick={() => startBatchAccept(msg.graphUpdates)}
+                disabled={!!progress}
+              >
+                {#if progress}
+                  Accepting {progress.current}/{progress.total}...
+                {:else}
+                  Accept All
+                {/if}
+              </button>
+            {/if}
             {#each msg.graphUpdates as update}
               <GraphUpdateCard {update} {sessionId} {nodeMap} {onNodeSelect}
+                triggerAccept={isBatchCurrent(msg.graphUpdates, update)}
+                onAccepted={() => onBatchCardAccepted(msg.graphUpdates, update)}
                 onCascade={(proposals) => {
                   msg.graphUpdates = [...msg.graphUpdates, ...proposals];
                 }}
@@ -422,6 +492,12 @@
   .message.assistant .bubble :global(.fmt-wikilink) {
     color: var(--accent);
     font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  .message.assistant .bubble :global(.fmt-wikilink:hover) {
+    text-decoration: underline;
   }
 
   /* ── Error state ── */
@@ -584,6 +660,29 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-xs);
+  }
+
+  .btn-accept-all {
+    padding: 5px 14px;
+    border: 1px solid var(--success);
+    border-radius: 6px;
+    background: var(--success-soft, rgba(34, 197, 94, 0.1));
+    color: var(--success);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    align-self: flex-start;
+  }
+
+  .btn-accept-all:hover:not(:disabled) {
+    background: var(--success);
+    color: #0f0f1a;
+  }
+
+  .btn-accept-all:disabled {
+    opacity: 0.7;
+    cursor: default;
   }
 
   /* ── Relevant nodes ── */

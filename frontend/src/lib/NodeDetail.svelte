@@ -1,15 +1,40 @@
 <script>
   import { getTypeColor, getDomainColor } from './colors.js';
   import { formatText } from './format.js';
-  import { updateNode } from './api.js';
+  import { updateNode, deleteNode } from './api.js';
 
-  let { node, neighbors = [], schema = null, onClose = () => {}, onNodeClick = () => {} } = $props();
+  let { node, neighbors = [], schema = null, onClose = () => {}, onNodeClick = () => {}, onDelete = () => {} } = $props();
 
   const SKIP_KEYS = new Set(['id', 'type', 'title', 'content', 'filepath', 'tags']);
 
   // Edit mode state
   let isEditing = $state(false);
   let isSaving = $state(false);
+
+  // Delete state
+  let confirmDelete = $state(false);
+  let isDeleting = $state(false);
+
+  async function doDelete() {
+    isDeleting = true;
+    try {
+      await deleteNode(node.id);
+      onClose();
+      onDelete(node.id);
+    } catch (err) {
+      console.error('Failed to delete node:', err);
+      isDeleting = false;
+      confirmDelete = false;
+    }
+  }
+
+  function handleWikilinkClick(e) {
+    if (e.target.classList.contains('fmt-wikilink')) {
+      e.preventDefault();
+      const nodeId = e.target.dataset.nodeId;
+      if (nodeId) onNodeClick(nodeId);
+    }
+  }
   let editTitle = $state('');
   let editContent = $state('');
   let editTags = $state([]);
@@ -145,8 +170,13 @@
           {isSaving ? 'Saving...' : 'Save'}
         </button>
         <button class="action-btn cancel" onclick={cancelEditing} disabled={isSaving}>Cancel</button>
+      {:else if confirmDelete}
+        <span class="delete-confirm-text">Delete?</span>
+        <button class="action-btn confirm-delete" onclick={doDelete} disabled={isDeleting}>Yes</button>
+        <button class="action-btn cancel-delete" onclick={() => confirmDelete = false} disabled={isDeleting}>No</button>
       {:else}
         <button class="action-btn edit" onclick={startEditing}>Edit</button>
+        <button class="action-btn delete" onclick={() => confirmDelete = true}>Delete</button>
       {/if}
       <button class="close-btn" onclick={onClose}>&times;</button>
     </div>
@@ -198,7 +228,8 @@
   {#if isEditing}
     <textarea class="edit-content" bind:value={editContent} rows="10"></textarea>
   {:else if node.content}
-    <div class="content">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="content" onclick={handleWikilinkClick}>
       {@html formatText(node.content)}
     </div>
   {/if}
@@ -322,7 +353,10 @@
     font-family: var(--font-mono); font-size: 0.88em; color: var(--accent);
   }
   .content :global(.fmt-list) { padding-left: 1.2em; margin: 0.3em 0; }
-  .content :global(.fmt-wikilink) { color: var(--accent); font-weight: 500; }
+  .content :global(.fmt-wikilink) {
+    color: var(--accent); font-weight: 500; cursor: pointer; text-decoration: none;
+  }
+  .content :global(.fmt-wikilink:hover) { text-decoration: underline; }
 
   /* ── Neighbors ── */
 
@@ -394,6 +428,27 @@
 
   .action-btn.cancel { color: var(--text-muted); }
   .action-btn.cancel:hover { background: var(--bg-surface-hover); }
+
+  .action-btn.delete { color: var(--text-muted); }
+  .action-btn.delete:hover { background: var(--error-soft); color: var(--error); border-color: var(--error); }
+
+  .delete-confirm-text {
+    font-size: var(--text-xs);
+    color: var(--error);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .action-btn.confirm-delete {
+    background: var(--error);
+    color: white;
+    border-color: var(--error);
+  }
+  .action-btn.confirm-delete:hover { opacity: 0.9; }
+  .action-btn.confirm-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .action-btn.cancel-delete { color: var(--text-muted); }
+  .action-btn.cancel-delete:hover { background: var(--bg-surface-hover); }
 
   .edit-title {
     font-size: var(--text-xl);

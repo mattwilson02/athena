@@ -239,6 +239,8 @@ Rethink the type system from scratch. Current 27 types grew organically with unc
 2. **State-aware mode adjustment** — feed user state into mode classifier. Stressed + Advisor → soften. Burned out → don't pile on.
 3. **Relationship tracking** — person mention frequency, influence, growth patterns on person nodes.
 4. **Fundamentals monitoring** — alert when a fundamental goes neglected 2+ weeks.
+5. **Passive habit inference** — mine daily nodes and chat history for habit completion signals instead of requiring explicit logging. Habit schema gains a `kind` field (build/break/periodic) so streaks display correctly: build habits show consecutive completions, break habits show days clean, periodic habits show last done / next due. Accountability view populated by inference, not manual check-ins.
+6. **Query-aware retrieval pipeline** — replace the one-size-fits-all top-5 retrieval with intent-classified strategies. Three changes: (a) classify query intent (temporal/relational/focused/exploratory) and retrieve accordingly — temporal pulls all dailies in range, relational pulls person + all linked nodes; (b) pre-injection summarization compresses high-volume retrievals into dense one-liners before hitting the prompt; (c) dynamic token budget scales with data volume instead of fixed 3000. Prerequisite for items 4 and 5 — fundamentals monitoring and habit inference both need broad temporal coverage.
 
 ### Out of Scope
 - Predictive scheduling (Stage 2)
@@ -257,7 +259,13 @@ Rethink the type system from scratch. Current 27 types grew organically with unc
 3. Person mentioned 5x → influence tracked on node
 4. Fundamental neglected 2 weeks → surfaced in conversation
 5. State inference produces correct states for test patterns
-6. All tests pass + state inference, fundamentals monitoring tests
+6. Habit with no explicit logging → inferred from daily node content → streak updates
+7. Break habit (e.g. nicotine) → shows days clean, not "Broken"
+8. Periodic habit (e.g. 48hr fast) → shows last done / next due, not daily streak
+9. Temporal query ("what happened this week") → all dailies in range retrieved, compressed timeline in response
+10. Relational query ("how's my relationship with X") → person node + linked experiences/events all in context
+11. Focused query → retrieval unchanged from current behaviour (no regression)
+12. All tests pass + state inference, fundamentals monitoring, habit inference, retrieval tests
 
 ### Risk
 - State inference from text is noisy. Mitigation: require 3+ signals before adjusting. Probabilistic, not definitive.
