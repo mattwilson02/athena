@@ -28,8 +28,8 @@ export function formatText(text) {
   html = html.replace(/^## (.+)$/gm, '<h4 class="fmt-h2">$1</h4>');
   html = html.replace(/^# (.+)$/gm, '<h3 class="fmt-h1">$1</h3>');
 
-  // Wikilinks → styled spans
-  html = html.replace(/\[\[([^\]]+)\]\]/g, '<span class="fmt-wikilink">$1</span>');
+  // Wikilinks → clickable anchors
+  html = html.replace(/\[\[([^\]]+)\]\]/g, '<a class="fmt-wikilink" data-node-id="$1" href="#">$1</a>');
 
   // Unordered lists — wrap consecutive - items
   html = html.replace(/^- (.+)$/gm, '<li>$1</li>');

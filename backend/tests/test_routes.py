@@ -285,6 +285,21 @@ class TestVaultRoutes:
         resp = client.post("/api/vault/write", content_type="application/json")
         assert resp.status_code == 400
 
+    def test_delete_route_returns_ok(self, client, tmp_vault):
+        resp = client.delete("/api/vault/node/learn-piano")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data.get("ok") is True
+        assert data["node_id"] == "learn-piano"
+        assert "archived_to" in data
+        assert "stats" in data
+
+    def test_delete_nonexistent_returns_404(self, client):
+        resp = client.delete("/api/vault/node/no-such-node")
+        assert resp.status_code == 404
+        data = resp.get_json()
+        assert "error" in data
+
 
 # ── Simple Chat Routes (Phase 3) ────────────────────────────────────────
 

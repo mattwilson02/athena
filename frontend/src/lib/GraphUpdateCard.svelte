@@ -2,7 +2,8 @@
   import { writeNode, updateNode, dismissUpdate, getNode } from './api.js';
   import { getTypeColor } from './colors.js';
 
-  let { update, sessionId = null, nodeMap = {}, onNodeSelect = () => {}, onAccepted = () => {}, onDismissed = () => {}, onCascade = () => {} } = $props();
+  let { update, sessionId = null, nodeMap = {}, onNodeSelect = () => {}, onAccepted = () => {}, onDismissed = () => {}, onCascade = () => {}, triggerAccept = false } = $props();
+
   const initialStatus = update._dismissed ? 'dismissed' : update._alreadyInVault ? 'accepted' : 'pending';
   let status = $state(initialStatus);
   let errorMsg = $state('');
@@ -81,6 +82,13 @@
   let challengeStep = $derived(update._challenge?.step ?? 0);
   let challengeBlocked = $derived(hasChallenge && challengeStep < 5);
   let hasLongContent = $derived(update.content && update.content.length > CONTENT_PREVIEW_LENGTH);
+
+  // Batch accept: fire when parent sets triggerAccept = true
+  $effect(() => {
+    if (triggerAccept && status === 'pending' && !hasDuplicate) {
+      accept();
+    }
+  });
   let displayContent = $derived(
     hasLongContent && !contentExpanded
       ? update.content.slice(0, CONTENT_PREVIEW_LENGTH) + '...'

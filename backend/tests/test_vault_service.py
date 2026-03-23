@@ -374,6 +374,61 @@ class TestSuggestType:
         assert _suggest_type("LESSON", valid) == "pill"
 
 
+class TestVaultServiceDelete:
+
+    def test_delete_moves_to_backup(self, tmp_vault, schema, graph):
+        svc = _make_service(tmp_vault, schema, graph)
+        original = tmp_vault / "Self" / "Goals" / "learn-piano.md"
+        assert original.exists()
+
+        result = svc.delete("learn-piano")
+        assert result.get("ok") is True
+        assert not original.exists()
+        assert (tmp_vault / "_backup" / "Self" / "Goals" / "learn-piano.md").exists()
+
+    def test_delete_updates_graph(self, tmp_vault, schema, graph):
+        svc = _make_service(tmp_vault, schema, graph)
+        svc.delete("learn-piano")
+        assert graph.get_node("learn-piano") is None
+
+    def test_delete_nonexistent_returns_404(self, tmp_vault, schema, graph):
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.delete("no-such-node")
+        assert "error" in result
+        assert result["status"] == 404
+
+    def test_delete_preserves_subdirectory_structure(self, tmp_vault, schema, graph):
+        svc = _make_service(tmp_vault, schema, graph)
+        result = svc.delete("learn-piano")
+        assert result.get("ok") is True
+        archived_to = result["archived_to"]
+        # Should preserve Self/Goals/ structure
+        assert "Self/Goals" in archived_to or "Self\\Goals" in archived_to
+        assert "learn-piano.md" in archived_to
+
+    def test_delete_removes_from_vector_index(self, tmp_vault, schema, graph):
+        from unittest.mock import MagicMock
+        from vault_parser import VaultParser
+        from schema_parser import get_edge_map
+
+        parser = VaultParser(str(tmp_vault), edge_map=get_edge_map(schema))
+        vector_index = MagicMock()
+        vector_index.rebuild = MagicMock()
+        vector_index.search = MagicMock(return_value=[])
+        vector_index.find_duplicates = MagicMock(return_value=[])
+        vector_index.delete_one = MagicMock()
+
+        def rebuild():
+            nodes, edges = parser.parse()
+            graph.build_from_parsed(nodes, edges)
+            return graph.get_stats()
+
+        rebuild()
+        svc = VaultService(str(tmp_vault), graph, vector_index, schema, rebuild)
+        svc.delete("learn-piano")
+        vector_index.delete_one.assert_called_once_with("learn-piano")
+
+
 class TestImportProposals:
 
     def _setup_backup(self, tmp_vault):

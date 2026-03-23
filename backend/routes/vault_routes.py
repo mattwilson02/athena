@@ -47,6 +47,16 @@ def vault_update():
     return jsonify(result)
 
 
+@vault_bp.route("/api/vault/node/<node_id>", methods=["DELETE"])
+def vault_delete_node(node_id):
+    vault_service = current_app.config["vault_service"]
+    result = vault_service.delete(node_id)
+    status = result.pop("status", 200)
+    if "error" in result:
+        return jsonify(result), status
+    return jsonify(result)
+
+
 @vault_bp.route("/api/vault/rebuild", methods=["POST"])
 def vault_rebuild():
     stats = current_app.config["rebuild_fn"]()
