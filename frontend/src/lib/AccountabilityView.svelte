@@ -37,6 +37,24 @@
     const d = new Date(dateStr + 'T00:00:00');
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
+
+  function fundamentalLabel(key) {
+    const labels = {
+      movement: 'Movement',
+      sleep: 'Sleep',
+      nutrition: 'Nutrition',
+      connection: 'Connection',
+      purpose: 'Purpose',
+      financial_stability: 'Financial Stability',
+    };
+    return labels[key] ?? key;
+  }
+
+  function fundamentalStatusLabel(status) {
+    if (status === 'active') return 'Active';
+    if (status === 'neglected') return 'Neglected';
+    return 'Untracked';
+  }
 </script>
 
 <div class="accountability-view">
@@ -147,6 +165,45 @@
         </div>
       {/if}
     </section>
+
+    <!-- Fundamentals section -->
+    {#if data.fundamentals && data.fundamentals.length > 0}
+      <section class="section">
+        <div class="section-header">
+          <h3 class="section-title">Fundamentals</h3>
+          {#if data.fundamentals_summary}
+            <div class="fundamentals-summary">
+              <span class="fund-stat active">{data.fundamentals_summary.active} active</span>
+              <span class="fund-stat neglected">{data.fundamentals_summary.neglected} neglected</span>
+              <span class="fund-stat no-data">{data.fundamentals_summary.no_data} untracked</span>
+            </div>
+          {/if}
+        </div>
+        <div class="fundamentals-grid">
+          {#each data.fundamentals as fund}
+            <div class="fundamental-card" class:neglected={fund.status === 'neglected'} class:no-data={fund.status === 'no_data'} class:active={fund.status === 'active'}>
+              <div class="fundamental-header">
+                <span class="fundamental-name">{fundamentalLabel(fund.fundamental)}</span>
+                <span class="fundamental-badge {fund.status}">{fundamentalStatusLabel(fund.status)}</span>
+              </div>
+              {#if fund.status !== 'no_data'}
+                <div class="fundamental-meta">
+                  {#if fund.days_since_activity != null}
+                    <span class="fundamental-recency">Last: {formatDaysAgo(fund.days_since_activity)}</span>
+                  {/if}
+                  {#if fund.related_habits && fund.related_habits.length > 0}
+                    <span class="fundamental-habits">{fund.related_habits.join(', ')}</span>
+                  {/if}
+                </div>
+              {/if}
+              {#if fund.message}
+                <div class="fundamental-message">{fund.message}</div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
   {/if}
 </div>
 
@@ -420,5 +477,123 @@
   .consequence-type {
     color: var(--text-muted);
     font-size: 10px;
+  }
+
+  /* Fundamentals */
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+  }
+
+  .fundamentals-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  .fund-stat {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 99px;
+  }
+
+  .fund-stat.active {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+
+  .fund-stat.neglected {
+    background: var(--error-soft);
+    color: var(--error);
+  }
+
+  .fund-stat.no-data {
+    background: var(--bg-surface-hover);
+    color: var(--text-muted);
+  }
+
+  .fundamentals-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--space-sm);
+  }
+
+  .fundamental-card {
+    padding: var(--space-md);
+    background: var(--bg-surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+  }
+
+  .fundamental-card.neglected { border-left: 3px solid var(--error); }
+  .fundamental-card.no-data { border-left: 3px solid var(--border); opacity: 0.7; }
+  .fundamental-card.active { border-left: 3px solid var(--success); }
+
+  .fundamental-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+  }
+
+  .fundamental-name {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .fundamental-badge {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 99px;
+    flex-shrink: 0;
+  }
+
+  .fundamental-badge.active {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+
+  .fundamental-badge.neglected {
+    background: var(--error-soft);
+    color: var(--error);
+  }
+
+  .fundamental-badge.no_data {
+    background: var(--bg-surface-hover);
+    color: var(--text-muted);
+  }
+
+  .fundamental-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .fundamental-recency {
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .fundamental-habits {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .fundamental-message {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-style: italic;
+    line-height: 1.4;
   }
 </style>

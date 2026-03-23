@@ -508,3 +508,160 @@ class TestTraceConsequences:
         # Should not loop and should not include t1 (starting node)
         ids = [c["node_id"] for c in result]
         assert "t1" not in ids
+
+# ── check_fundamentals ──
+
+
+from services.accountability_service import check_fundamentals
+
+
+def _make_habit(nid: str, title: str, tags: list | None = None, status: str = "active") -> dict:
+    return {"id": nid, "type": "habit", "title": title, "tags": tags or [], "status": status, "content": ""}
+
+
+def _make_daily(nid: str, date_str: str) -> dict:
+    return {"id": nid, "type": "daily", "title": nid, "date": date_str, "content": ""}
+
+
+class TestCheckFundamentals:
+
+    def _graph_with_habit_and_dailies(
+        self, habit: dict, daily_dates: list[str]
+    ) -> "FakeGraph":
+        """Build a FakeGraph with one habit linked to daily nodes."""
+        nodes = [habit]
+        edges: list[tuple] = []
+        for i, d in enumerate(daily_dates):
+            daily_id = f"daily-{i}"
+            nodes.append(_make_daily(daily_id, d))
+            edges.append((habit["id"], daily_id, "relates_to"))
+        return FakeGraph(nodes, edges)
+
+    def test_fundamentals_movement_neglected(self):
+        """Gym habit with last daily 16 days ago → movement neglected."""
+        today = date.today()
+        last = (today - timedelta(days=16)).isoformat()
+        habit = _make_habit("gym", "Strength Training")
+        graph = self._graph_with_habit_and_dailies(habit, [last])
+        result = check_fundamentals(graph, today)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement_entries) == 1
+        assert movement_entries[0]["status"] == "neglected"
+        assert movement_entries[0]["days_since_activity"] == 16
+
+    def test_fundamentals_movement_active(self):
+        """Gym habit with daily yesterday → NOT in results (active)."""
+        today = date.today()
+        yesterday = (today - timedelta(days=1)).isoformat()
+        habit = _make_habit("gym", "Gym Workout")
+        graph = self._graph_with_habit_and_dailies(habit, [yesterday])
+        result = check_fundamentals(graph, today)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement_entries) == 0
+
+    def test_fundamentals_movement_active_include_active(self):
+        """With include_active=True, active fundamentals are returned."""
+        today = date.today()
+        yesterday = (today - timedelta(days=1)).isoformat()
+        habit = _make_habit("gym", "Gym Workout")
+        graph = self._graph_with_habit_and_dailies(habit, [yesterday])
+        result = check_fundamentals(graph, today, include_active=True)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement_entries) == 1
+        assert movement_entries[0]["status"] == "active"
+
+    def test_fundamentals_no_data(self):
+        """No habits match 'nutrition' keywords → nutrition appears as no_data."""
+        habit = _make_habit("gym", "Strength Training")
+        graph = FakeGraph([habit], [])
+        result = check_fundamentals(graph, date.today())
+        nutrition_entries = [f for f in result if f["fundamental"] == "nutrition"]
+        assert len(nutrition_entries) == 1
+        assert nutrition_entries[0]["status"] == "no_data"
+
+    def test_fundamentals_multiple_habits_per_category(self):
+        """Two movement habits — most recent daily across both is used."""
+        today = date.today()
+        old_date = (today - timedelta(days=20)).isoformat()
+        recent_date = (today - timedelta(days=3)).isoformat()
+        habit1 = _make_habit("gym", "Gym Training")
+        habit2 = _make_habit("running", "Morning Run")
+        daily1 = _make_daily("d1", old_date)
+        daily2 = _make_daily("d2", recent_date)
+        graph = FakeGraph(
+            [habit1, habit2, daily1, daily2],
+            [("gym", "d1", "relates_to"), ("running", "d2", "relates_to")],
+        )
+        result = check_fundamentals(graph, today)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        # Most recent daily is 3 days ago — should be active (not neglected)
+        assert len(movement_entries) == 0  # active, so filtered out
+
+    def test_fundamentals_lapsed_habit_still_counted(self):
+        """Lapsed habit's dailies still count for recency."""
+        today = date.today()
+        recent = (today - timedelta(days=5)).isoformat()
+        habit = _make_habit("gym", "Gym Training", status="lapsed")
+        graph = self._graph_with_habit_and_dailies(habit, [recent])
+        result = check_fundamentals(graph, today)
+        # 5 days ago = active (≤14), so not in results
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement_entries) == 0
+
+    def test_fundamentals_lapsed_habit_neglected(self):
+        """Lapsed habit with old dailies → still shows as neglected."""
+        today = date.today()
+        old = (today - timedelta(days=30)).isoformat()
+        habit = _make_habit("gym", "Gym Training", status="lapsed")
+        graph = self._graph_with_habit_and_dailies(habit, [old])
+        result = check_fundamentals(graph, today)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement_entries) == 1
+        assert movement_entries[0]["status"] == "neglected"
+
+    def test_fundamentals_empty_when_all_active(self):
+        """All fundamentals with recent activity → empty result."""
+        today = date.today()
+        yesterday = (today - timedelta(days=1)).isoformat()
+        # One habit for each fundamental that has keywords
+        habits_and_dailies = [
+            (_make_habit("gym", "Gym Training"), yesterday),
+            (_make_habit("sleep-routine", "Sleep by 11pm"), yesterday),
+            (_make_habit("meal-prep", "Weekly Meal Prep"), yesterday),
+            (_make_habit("friends", "Weekly dinner with friends"), yesterday),
+            (_make_habit("reading", "Daily Reading"), yesterday),
+            (_make_habit("budget-review", "Monthly Budget Review"), yesterday),
+        ]
+        nodes = []
+        edges: list[tuple] = []
+        for i, (habit, date_str) in enumerate(habits_and_dailies):
+            nodes.append(habit)
+            daily = _make_daily(f"d-{i}", date_str)
+            nodes.append(daily)
+            edges.append((habit["id"], daily["id"], "relates_to"))
+        graph = FakeGraph(nodes, edges)
+        result = check_fundamentals(graph, today)
+        # All are active → only no_data entries remain (for any unmatched categories)
+        neglected = [f for f in result if f["status"] == "neglected"]
+        assert len(neglected) == 0
+
+    def test_fundamentals_keyword_matching_case_insensitive(self):
+        """'Strength Training' matches 'strength' keyword."""
+        today = date.today()
+        old = (today - timedelta(days=20)).isoformat()
+        habit = _make_habit("h1", "Strength Training")
+        graph = self._graph_with_habit_and_dailies(habit, [old])
+        result = check_fundamentals(graph, today)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement_entries) == 1
+        assert movement_entries[0]["status"] == "neglected"
+
+    def test_fundamentals_returns_related_habits(self):
+        """Neglected entry includes related_habits list."""
+        today = date.today()
+        old = (today - timedelta(days=20)).isoformat()
+        habit = _make_habit("gym-h", "Gym Session")
+        graph = self._graph_with_habit_and_dailies(habit, [old])
+        result = check_fundamentals(graph, today)
+        movement_entries = [f for f in result if f["fundamental"] == "movement"]
+        assert "gym-h" in movement_entries[0]["related_habits"]

@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone
 
 from mentor_agent import classify_mode, _get_permanence
 from services.conflict_service import detect_conflicts
+from services.state_service import infer_state
 from services.vault_service import _PERMANENCE_WARNINGS
 
 logger = logging.getLogger(__name__)
@@ -34,18 +35,35 @@ class ChatService:
             return []
 
     def _build_alerts(self) -> dict:
-        """Compute accountability alerts (broken streaks, overdue commitments)."""
+        """Compute accountability alerts (broken streaks, overdue commitments, fundamentals)."""
         try:
-            from services.accountability_service import calculate_streaks, find_overdue_commitments
+            from services.accountability_service import (
+                calculate_streaks, find_overdue_commitments, check_fundamentals,
+            )
             streaks = calculate_streaks(self.graph)
             overdue = find_overdue_commitments(self.graph, date.today())
+            fundamentals = check_fundamentals(self.graph, date.today())
             return {
                 "broken_streaks": [s for s in streaks if s["streak_status"] == "broken"],
                 "at_risk_streaks": [s for s in streaks if s["streak_status"] == "at_risk"],
                 "overdue_commitments": overdue,
+                "neglected_fundamentals": [f for f in fundamentals if f["status"] == "neglected"],
+                "untracked_fundamentals": [f for f in fundamentals if f["status"] == "no_data"],
             }
         except Exception:
             logger.exception("Accountability service failed — proceeding with empty alerts")
+            return {}
+
+    def _infer_state(self, session_id: str) -> dict:
+        """Infer user state from the current session's recent messages."""
+        try:
+            session = self.chat_store.get_session(session_id)
+            if session is None:
+                return {}
+            recent_messages = session.get("messages", [])[-10:]
+            return infer_state(recent_messages)
+        except Exception:
+            logger.exception("State inference failed — proceeding with empty state")
             return {}
 
     def send_message(self, session_id: str, message: str) -> dict:
@@ -58,6 +76,9 @@ class ChatService:
             return {"error": "Session not found", "status": 404}
 
         dismissed_ids = session.get("dismissed_updates", [])
+
+        # Infer user state from recent session messages (before saving new message)
+        state = self._infer_state(session_id)
 
         # Detect conflicts before calling the mentor
         conflicts = self._detect_conflicts(message)
@@ -87,7 +108,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -140,6 +161,9 @@ class ChatService:
 
         dismissed_ids = session.get("dismissed_updates", [])
 
+        # Infer user state from recent session messages (before saving new message)
+        state = self._infer_state(session_id)
+
         # Detect conflicts before calling the mentor
         conflicts = self._detect_conflicts(message)
 
@@ -165,7 +189,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":
