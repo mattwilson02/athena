@@ -160,6 +160,9 @@
     <button class:active={currentView === 'accountability'} onclick={() => onViewChange('accountability')}>
       Track
     </button>
+    <button class:active={currentView === 'relationships'} onclick={() => onViewChange('relationships')}>
+      People
+    </button>
   </nav>
 
   {#if currentView === 'chat'}

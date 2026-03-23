@@ -6,6 +6,7 @@
   import SearchModal from './lib/SearchModal.svelte';
   import TimelineView from './lib/TimelineView.svelte';
   import AccountabilityView from './lib/AccountabilityView.svelte';
+  import RelationshipsView from './lib/RelationshipsView.svelte';
   import CreateNodeModal from './lib/CreateNodeModal.svelte';
 
   let currentView = $state('chat');
@@ -148,6 +149,8 @@
       <TimelineView onNodeSelect={handleNodeSelect} />
     {:else if currentView === 'accountability'}
       <AccountabilityView />
+    {:else if currentView === 'relationships'}
+      <RelationshipsView />
     {/if}
   </div>
 </div>
