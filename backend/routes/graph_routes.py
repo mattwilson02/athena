@@ -13,6 +13,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from services.accountability_service import calculate_streaks, find_overdue_commitments, check_fundamentals
 from services.relationship_service import scan_mentions, assess_relationship_health
+from services.planning_service import compile_briefing, compare_plan_reality, analyze_plan_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,59 @@ def get_relationships():
     }
 
     return jsonify({"relationships": relationships, "summary": summary})
+
+
+@graph_bp.route("/api/briefing", methods=["GET"])
+def get_briefing():
+    """Return the structured daily briefing: events, tasks, habits, plan, patterns.
+
+    Query parameters:
+      date (optional) — ISO date string (YYYY-MM-DD). Defaults to today.
+    """
+    from datetime import datetime as _dt
+    g = current_app.config["graph"]
+
+    # Parse optional date parameter
+    date_param = request.args.get("date")
+    if date_param:
+        try:
+            target_date = _dt.fromisoformat(date_param).date()
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid date format. Use ISO date (YYYY-MM-DD)."}), 400
+    else:
+        target_date = _date.today()
+
+    try:
+        streaks = calculate_streaks(g)
+        overdue = find_overdue_commitments(g, target_date)
+        fundamentals = check_fundamentals(g, target_date)
+
+        briefing = compile_briefing(
+            g,
+            {"streaks": streaks, "overdue": overdue, "fundamentals": fundamentals},
+            target_date,
+        )
+
+        # Plan-reality comparison for today's daily node (if a plan exists)
+        plan_reality = None
+        active_plan = briefing.get("active_plan")
+        if active_plan:
+            daily_id = active_plan.get("daily_id")
+            if daily_id:
+                plan_reality = compare_plan_reality(g, daily_id)
+
+        # Patterns always reflect the last 14 days regardless of requested date
+        patterns = analyze_plan_patterns(g)
+
+    except Exception:
+        logger.exception("Planning service error")
+        return jsonify({"error": "Failed to compile briefing"}), 500
+
+    return jsonify({
+        "briefing": briefing,
+        "plan_reality": plan_reality,
+        "patterns": patterns,
+    })
 
 
 @graph_bp.route("/api/debug/retrieval", methods=["GET"])

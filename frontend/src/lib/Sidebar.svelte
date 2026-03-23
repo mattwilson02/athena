@@ -162,6 +162,9 @@
     <button class:active={currentView === 'relationships'} onclick={() => onViewChange('relationships')}>
       People
     </button>
+    <button class:active={currentView === 'today'} onclick={() => onViewChange('today')}>
+      Today
+    </button>
   </nav>
 
   {#if currentView === 'chat'}

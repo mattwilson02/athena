@@ -183,6 +183,13 @@ export function getRelationships() {
   return fetchJSON(`${BASE}/relationships`);
 }
 
+// --- Briefing ---
+
+export function getBriefing(date = null) {
+  const params = date ? `?date=${date}` : '';
+  return fetchJSON(`${BASE}/briefing${params}`);
+}
+
 // --- Debug ---
 
 export function getRetrievalDiagnostics(query) {

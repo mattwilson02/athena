@@ -7,6 +7,7 @@
   import TimelineView from './lib/TimelineView.svelte';
   import AccountabilityView from './lib/AccountabilityView.svelte';
   import RelationshipsView from './lib/RelationshipsView.svelte';
+  import DailyPlanView from './lib/DailyPlanView.svelte';
 
   let currentView = $state('chat');
   let currentSessionId = $state(null);
@@ -140,6 +141,8 @@
       <AccountabilityView />
     {:else if currentView === 'relationships'}
       <RelationshipsView />
+    {:else if currentView === 'today'}
+      <DailyPlanView onNodeSelect={handleNodeSelect} />
     {/if}
   </div>
 </div>

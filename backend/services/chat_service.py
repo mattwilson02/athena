@@ -53,6 +53,10 @@ class ChatService:
                 "overdue_commitments": overdue,
                 "neglected_fundamentals": [f for f in fundamentals if f["status"] == "neglected"],
                 "untracked_fundamentals": [f for f in fundamentals if f["status"] == "no_data"],
+                # Raw data for briefing computation (avoids duplicate service calls)
+                "_raw_streaks": streaks,
+                "_raw_overdue": overdue,
+                "_raw_fundamentals": fundamentals,
             }
         except Exception:
             logger.exception("Accountability service failed — proceeding with empty alerts")
@@ -90,6 +94,29 @@ class ChatService:
             ChatService._last_relationship_persist = now
         except Exception:
             logger.exception("Relationship persistence failed — non-critical, skipping")
+
+    def _build_briefing(self, alerts: dict) -> tuple[dict, dict]:
+        """Compute today's briefing and plan patterns from pre-computed alert data.
+
+        Uses raw streak/overdue/fundamentals from alerts to avoid duplicate service calls.
+        Returns (briefing, plan_patterns). Both are empty dicts on error.
+        """
+        try:
+            from services.planning_service import compile_briefing, analyze_plan_patterns
+            briefing = compile_briefing(
+                self.graph,
+                {
+                    "streaks": alerts.get("_raw_streaks") or [],
+                    "overdue": alerts.get("_raw_overdue") or [],
+                    "fundamentals": alerts.get("_raw_fundamentals") or [],
+                },
+                date.today(),
+            )
+            plan_patterns = analyze_plan_patterns(self.graph)
+            return briefing, plan_patterns
+        except Exception:
+            logger.exception("Briefing computation failed — proceeding with empty briefing")
+            return {}, {}
 
     def _infer_state(self, session_id: str) -> dict:
         """Infer user state from the current session's recent messages."""
@@ -140,6 +167,9 @@ class ChatService:
         # Persist relationship mention stats (throttled)
         self._maybe_persist_relationships(alerts.get("_all_relationships", []))
 
+        # Compute daily briefing (uses pre-computed alert data — defensive)
+        briefing, plan_patterns = self._build_briefing(alerts)
+
         # Save user message
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
 
@@ -148,7 +178,7 @@ class ChatService:
         history = history[:-1]
 
         try:
-            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state)
+            result = self.mentor.chat(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state, briefing=briefing, plan_patterns=plan_patterns)
         except anthropic.AuthenticationError:
             return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY.", "status": 401}
         except anthropic.RateLimitError:
@@ -165,12 +195,13 @@ class ChatService:
             logger.error("Network error reaching Claude API")
             return {"error": "Can't reach Claude right now. Check your connection.", "status": 503}
 
-        # Post-process: dedup check + supersession validation + challenge ladder + permanence warnings + commitment enrichment
+        # Post-process: dedup check + supersession validation + challenge ladder + permanence warnings + commitment enrichment + plan validation
         graph_updates = self._dedup_check(result["graph_updates"])
         graph_updates = self._validate_supersession(graph_updates)
         graph_updates = self._check_challenge_triggers(session_id, graph_updates)
         graph_updates = self._annotate_permanence_warnings(graph_updates)
         graph_updates = self._enrich_commitment_metadata(graph_updates)
+        graph_updates = self._process_plan_updates(graph_updates)
 
         # Save assistant message
         self.chat_store.append_message(session_id, {
@@ -227,12 +258,15 @@ class ChatService:
         # Persist relationship mention stats (throttled)
         self._maybe_persist_relationships(alerts.get("_all_relationships", []))
 
+        # Compute daily briefing (uses pre-computed alert data — defensive)
+        briefing, plan_patterns = self._build_briefing(alerts)
+
         self.chat_store.append_message(session_id, {"role": "user", "content": message})
         history = self.chat_store.get_messages_for_api(session_id)
         history = history[:-1]
 
         try:
-            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state):
+            for event_type, data in self.mentor.chat_stream(message, history, dismissed_ids=dismissed_ids, conflicts=conflicts, mode=mode, challenges=challenges, alerts=alerts, state=state, briefing=briefing, plan_patterns=plan_patterns):
                 if event_type == "text":
                     yield ("text", data)
                 elif event_type == "done":
@@ -241,6 +275,7 @@ class ChatService:
                     graph_updates = self._check_challenge_triggers(session_id, graph_updates)
                     graph_updates = self._annotate_permanence_warnings(graph_updates)
                     graph_updates = self._enrich_commitment_metadata(graph_updates)
+                    graph_updates = self._process_plan_updates(graph_updates)
                     self.chat_store.append_message(session_id, {
                         "role": "assistant",
                         "content": data["full_response"],
@@ -608,6 +643,73 @@ class ChatService:
             # Ensure commitment_context exists.
             if "commitment_context" not in fm:
                 fm["commitment_context"] = ""
+
+        return updates
+
+    def _process_plan_updates(self, updates: list[dict]) -> list[dict]:
+        """Validate and normalise plan data on daily node create/update actions.
+
+        For each update targeting a daily node with a ``planned`` list in frontmatter:
+        - Removes items missing a ``description`` field
+        - Sets ``completed`` to False when absent
+        - Deduplicates items by description (case-insensitive)
+        - Resets ``linked_node`` to None when it's not a string
+        """
+        for update in updates:
+            action = update.get("action", "")
+            if action == "create":
+                fm = update.get("frontmatter", {})
+                node_type = update.get("type", "")
+            elif action == "update":
+                fm = update.get("changes", {}).get("frontmatter", {})
+                node_type = update.get("type", "")
+                if not node_type:
+                    node_id = update.get("node_id", "")
+                    if node_id:
+                        existing = self.graph.get_node(node_id)
+                        if existing:
+                            node_type = existing.get("type", "")
+            else:
+                continue
+
+            if not isinstance(fm, dict):
+                continue
+            planned = fm.get("planned")
+            if planned is None or not isinstance(planned, list):
+                continue
+
+            # Only process daily nodes
+            if node_type != "daily":
+                continue
+
+            seen_descs: set[str] = set()
+            valid_items: list[dict] = []
+            for item in planned:
+                if not isinstance(item, dict):
+                    continue
+                description = item.get("description", "")
+                if not description or not isinstance(description, str):
+                    continue  # skip items without a description
+                desc_lower = description.lower()
+                if desc_lower in seen_descs:
+                    continue  # deduplicate
+                seen_descs.add(desc_lower)
+
+                linked = item.get("linked_node")
+                if linked is not None and not isinstance(linked, str):
+                    linked = None
+
+                completed = item.get("completed", False)
+                if not isinstance(completed, bool):
+                    completed = bool(completed)
+
+                valid_items.append({
+                    "description": description,
+                    "linked_node": linked,
+                    "completed": completed,
+                })
+
+            fm["planned"] = valid_items
 
         return updates
 

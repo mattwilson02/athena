@@ -592,7 +592,34 @@ Only tag explicit promises with clear deadlines. "I should probably do X sometim
 
 If the node already exists, use action: "update" with frontmatter changes to add committed_on and \
 commitment_context.
-If it's a new task/goal, include committed_on and commitment_context in the create frontmatter."""
+If it's a new task/goal, include committed_on and commitment_context in the create frontmatter.
+
+── 9. DAILY PLANS ──
+When the user describes what they plan to do today ("today I'm going to...", "my plan for today is...", \
+"I need to X, Y, and Z today", "for today I want to..."), capture it as a daily node update:
+
+  action: "update" (if today's daily exists) or "create" (if not)
+  type: "daily"
+  frontmatter:
+    date: "{today's date}"
+    planned:
+      - description: "Gym session"
+        linked_node: "strength-training"   // Link to existing habit/task if one matches
+        completed: false
+      - description: "Review PR"
+        linked_node: "finish-pr-review"    // Link to existing task if one matches
+        completed: false
+
+Link planned items to existing nodes when there's a clear match:
+- "go to the gym" → link to the user's gym/training habit
+- "finish the PR review" → link to an existing task node
+- "grocery shopping" → no link (ad-hoc activity, just description)
+
+When the user reports completing a planned item ("done with the gym", "finished the PR review"), \
+update the daily node's planned list to set completed: true for that item.
+
+Do NOT create a daily node just because the user says "today I..." in passing context. \
+Only capture when the user is explicitly describing their plan or agenda for the day."""
 
 
 def build_system_prompt(schema: dict, vault_path: str | None = None) -> tuple[str, dict[str, str]]:
@@ -1713,6 +1740,145 @@ class MentorAgent:
         return "\n".join(lines)
 
     @staticmethod
+    def _build_briefing_note(
+        briefing: dict | None,
+        patterns: dict | None,
+        state: dict | None = None,
+    ) -> str:
+        """Build the TODAY'S BRIEFING injection for the system prompt.
+
+        Returns an empty string when the briefing is empty (nothing relevant).
+        When the user's stress is elevated (high-confidence state), the briefing
+        is condensed to events + top 2 due items only to avoid overloading.
+        """
+        if not briefing:
+            return ""
+
+        events = briefing.get("events") or []
+        due_tasks = briefing.get("due_tasks") or []
+        habit_targets = briefing.get("habit_targets") or []
+        active_plan = briefing.get("active_plan")
+        overdue_summary = briefing.get("overdue_summary") or {}
+        yesterday_review = briefing.get("yesterday_review")
+        day_of_week = briefing.get("day_of_week", "")
+        date_str = briefing.get("date", "")
+
+        # Suppress completely if nothing useful to surface
+        if (
+            not events
+            and not due_tasks
+            and not habit_targets
+            and not active_plan
+            and not overdue_summary.get("count")
+        ):
+            return ""
+
+        # State-aware condensation: elevated stress + medium/high confidence → condense
+        _state = state or {}
+        stress = _state.get("stress", "none")
+        confidence = _state.get("confidence", "low")
+        condensed = stress == "elevated" and confidence in ("medium", "high")
+
+        lines = [
+            f"\n\nTODAY'S BRIEFING — {day_of_week}, {date_str}",
+            "Reference this when the user asks about their day, what's next, or what to focus on.",
+        ]
+
+        if events:
+            lines.append("\nSCHEDULED:")
+            for ev in events:
+                time_part = ev.get("time") or "?"
+                title = ev.get("title", "Event")
+                status = ev.get("status", "upcoming")
+                location = ev.get("location")
+                people = ev.get("people") or []
+                line = f"- {time_part} {title} ({status})"
+                if location:
+                    line += f" @ {location}"
+                if people:
+                    line += f" with {', '.join(people)}"
+                lines.append(line)
+
+        if condensed:
+            # Condensed mode: events already added above, just top 2 due tasks
+            if due_tasks:
+                lines.append("\nDUE TODAY (top 2):")
+                for task in due_tasks[:2]:
+                    priority = task.get("priority", "medium")
+                    title = task.get("title", "Task")
+                    lines.append(f"- [{priority}] {title}")
+            return "\n".join(lines)
+
+        # Full briefing
+        if due_tasks:
+            lines.append("\nDUE TODAY:")
+            for task in due_tasks[:5]:
+                priority = task.get("priority", "medium")
+                title = task.get("title", "Task")
+                project = task.get("project")
+                days_over = task.get("days_overdue", 0)
+                line = f"- [{priority}] {title}"
+                if project:
+                    line += f" (part of {project})"
+                if days_over > 0:
+                    line += f" — {days_over} day{'s' if days_over != 1 else ''} overdue"
+                lines.append(line)
+
+        if habit_targets:
+            lines.append("\nHABIT TARGETS (due today based on frequency):")
+            for habit in habit_targets:
+                title = habit.get("title", "Habit")
+                freq = habit.get("frequency", "weekly")
+                streak = habit.get("current_streak", 0)
+                status = habit.get("streak_status", "on_track")
+                lines.append(f"- {title} ({freq}, streak: {streak}, {status})")
+
+        overdue_count = overdue_summary.get("count", 0)
+        overdue_top = overdue_summary.get("top_items") or []
+        if overdue_count > 0:
+            lines.append("\nOVERDUE (carry-forward):")
+            for item in overdue_top:
+                title = item.get("title", "Item")
+                days = item.get("days_overdue", 0)
+                priority = item.get("priority", "medium")
+                lines.append(
+                    f"- {title} — {days} day{'s' if days != 1 else ''} overdue ({priority} priority)"
+                )
+
+        if active_plan:
+            planned = active_plan.get("planned") or []
+            done_count = sum(1 for p in planned if p.get("completed"))
+            total = len(planned)
+            plan_desc = ", ".join(p.get("description", "") for p in planned)
+            lines.append("\nACTIVE PLAN:")
+            lines.append(f"The user planned: {plan_desc}")
+            if planned:
+                # Show which items are done
+                done_descs = [p.get("description", "") for p in planned if p.get("completed")]
+                if done_descs:
+                    lines.append(
+                        f"Completed so far: {', '.join(done_descs)} ({done_count}/{total})"
+                    )
+                else:
+                    lines.append(f"Completed so far: 0/{total}")
+
+        if yesterday_review:
+            pc = yesterday_review.get("planned_count", 0)
+            cc = yesterday_review.get("completed_count", 0)
+            rate = round(yesterday_review.get("completion_rate", 0) * 100)
+            missed = yesterday_review.get("missed") or []
+            lines.append("\nYESTERDAY'S REVIEW:")
+            lines.append(f"Planned {pc}, completed {cc} ({rate}%).")
+            if missed:
+                lines.append(f"Missed: {', '.join(missed)}.")
+
+        if patterns and patterns.get("planning_insight"):
+            lines.append("\nPLANNING PATTERNS:")
+            lines.append(patterns["planning_insight"])
+
+        return "\n".join(lines)
+
+    @staticmethod
     def _build_proactive_alerts(alerts: dict, state: dict | None = None) -> str:
         """Build the PROACTIVE ALERTS injection for the system prompt.
 
@@ -1860,7 +2026,9 @@ class MentorAgent:
                     mode: str = "mirror",
                     challenges: dict | None = None,
                     alerts: dict | None = None,
-                    state: dict | None = None):
+                    state: dict | None = None,
+                    briefing: dict | None = None,
+                    plan_patterns: dict | None = None):
         """Streaming version of chat(). Yields (event_type, data) tuples.
 
         Events:
@@ -1874,6 +2042,7 @@ class MentorAgent:
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_briefing_note(briefing, plan_patterns, state=state)
         system += self._build_state_note(state or {})
         system += self._build_proactive_alerts(alerts or {}, state=state)
         system += self._build_conflict_note(conflicts or [])
@@ -1956,7 +2125,9 @@ class MentorAgent:
              mode: str = "mirror",
              challenges: dict | None = None,
              alerts: dict | None = None,
-             state: dict | None = None) -> dict:
+             state: dict | None = None,
+             briefing: dict | None = None,
+             plan_patterns: dict | None = None) -> dict:
         """Send a message with conversation history, get a response with graph update proposals.
 
         conversation_history: list of {role, content} dicts from the chat store.
@@ -1966,6 +2137,8 @@ class MentorAgent:
         challenges: active challenge ladder states keyed by node_id.
         alerts: proactive accountability alerts (broken streaks, overdue commitments).
         state: inferred user state (energy, stress, confidence) from recent messages.
+        briefing: today's structured daily briefing (events, tasks, habits, plan).
+        plan_patterns: aggregated plan-reality patterns over last 14 days.
         """
         relationship_data = (alerts or {}).get("_relationships_by_id")
         context, search_results = self.get_context(
@@ -1974,6 +2147,7 @@ class MentorAgent:
         today = date.today().strftime("%A %d %B %Y")
         system = self.system_prompt_template.format(context=context, today=today)
         system += self._build_dismissed_note(dismissed_ids or [])
+        system += self._build_briefing_note(briefing, plan_patterns, state=state)
         system += self._build_state_note(state or {})
         system += self._build_proactive_alerts(alerts or {}, state=state)
         system += self._build_conflict_note(conflicts or [])

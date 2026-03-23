@@ -893,6 +893,91 @@ class TestRelationshipRoutes:
         assert "response" in data
 
 
+class TestBriefingRoute:
+    """Tests for GET /api/briefing."""
+
+    def test_briefing_endpoint_returns_data(self, client):
+        """GET /api/briefing returns 200 with briefing key."""
+        resp = client.get("/api/briefing")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "briefing" in data
+
+    def test_briefing_endpoint_includes_patterns(self, client):
+        """Response includes patterns key."""
+        resp = client.get("/api/briefing")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "patterns" in data
+
+    def test_briefing_endpoint_includes_plan_reality(self, client):
+        """Response includes plan_reality key (may be None for empty graph)."""
+        resp = client.get("/api/briefing")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "plan_reality" in data
+
+    def test_briefing_endpoint_briefing_structure(self, client):
+        """Briefing dict has all required keys."""
+        resp = client.get("/api/briefing")
+        assert resp.status_code == 200
+        briefing = resp.get_json()["briefing"]
+        required_keys = ["date", "day_of_week", "events", "due_tasks",
+                         "habit_targets", "active_plan", "overdue_summary",
+                         "fundamentals_status", "yesterday_review"]
+        for key in required_keys:
+            assert key in briefing, f"Missing key: {key}"
+
+    def test_briefing_endpoint_custom_date(self, client):
+        """GET /api/briefing?date=2026-03-20 returns briefing for that date."""
+        resp = client.get("/api/briefing?date=2026-03-20")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["briefing"]["date"] == "2026-03-20"
+
+    def test_briefing_endpoint_invalid_date(self, client):
+        """GET /api/briefing?date=notadate returns 400."""
+        resp = client.get("/api/briefing?date=notadate")
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert "error" in data
+
+    def test_briefing_endpoint_error_handling(self, client):
+        """Planning service raising → 500 with error key."""
+        from unittest.mock import patch
+        with patch(
+            "routes.graph_routes.compile_briefing",
+            side_effect=RuntimeError("planning exploded"),
+        ):
+            resp = client.get("/api/briefing")
+        assert resp.status_code == 500
+        data = resp.get_json()
+        assert "error" in data
+
+
+class TestBriefingErrorDoesntBreakChat:
+    """Test that briefing computation errors don't break chat flow."""
+
+    def test_briefing_error_doesnt_break_chat(self, client):
+        """Mock planning_service to raise → chat proceeds normally."""
+        from unittest.mock import patch
+
+        create_resp = client.post("/api/chat/sessions")
+        sid = create_resp.get_json()["id"]
+
+        with patch(
+            "services.planning_service.compile_briefing",
+            side_effect=RuntimeError("briefing exploded"),
+        ):
+            resp = client.post("/api/chat", json={
+                "session_id": sid,
+                "message": "Hello Athena",
+            })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "response" in data
+
+
 class TestRelationshipPersistenceThrottle:
     """Test that relationship persistence is throttled."""
 

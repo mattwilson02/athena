@@ -1285,6 +1285,199 @@ class TestProactiveAlertsStateAware:
         assert count == 3
 
 
+# ── Briefing Note ──
+
+
+class TestBuildBriefingNote:
+    """Test MentorAgent._build_briefing_note()."""
+
+    def _agent(self):
+        from unittest.mock import MagicMock
+        schema = {"type_list": ["goal", "task", "habit", "daily", "event"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+        return agent
+
+    def _briefing(self, **kwargs):
+        base = {
+            "date": "2026-03-23",
+            "day_of_week": "Monday",
+            "events": [],
+            "due_tasks": [],
+            "habit_targets": [],
+            "active_plan": None,
+            "overdue_summary": {"count": 0, "top_items": []},
+            "fundamentals_status": {"neglected": [], "at_risk": []},
+            "yesterday_review": None,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_briefing_note_with_events(self):
+        agent = self._agent()
+        briefing = self._briefing(events=[{
+            "node_id": "dentist", "title": "Dentist Appointment",
+            "time": "14:00", "location": "City Dental",
+            "people": [], "status": "upcoming",
+        }])
+        result = agent._build_briefing_note(briefing, None)
+        assert "TODAY'S BRIEFING" in result
+        assert "SCHEDULED" in result
+        assert "Dentist Appointment" in result
+        assert "14:00" in result
+        assert "City Dental" in result
+
+    def test_briefing_note_with_due_tasks(self):
+        agent = self._agent()
+        briefing = self._briefing(due_tasks=[{
+            "node_id": "pr-review", "title": "Finish PR Review",
+            "priority": "high", "project": "project-alpha", "days_overdue": 0,
+        }])
+        result = agent._build_briefing_note(briefing, None)
+        assert "DUE TODAY" in result
+        assert "Finish PR Review" in result
+        assert "[high]" in result
+
+    def test_briefing_note_with_habit_targets(self):
+        agent = self._agent()
+        briefing = self._briefing(habit_targets=[{
+            "habit_id": "strength-training",
+            "title": "Strength Training",
+            "frequency": "3x/week",
+            "streak_status": "on_track",
+            "current_streak": 8,
+            "last_completed": "2026-03-21",
+            "due_today": True,
+        }])
+        result = agent._build_briefing_note(briefing, None)
+        assert "HABIT TARGETS" in result
+        assert "Strength Training" in result
+        assert "3x/week" in result
+
+    def test_briefing_note_with_active_plan(self):
+        agent = self._agent()
+        briefing = self._briefing(active_plan={
+            "daily_id": "monday-mar-23",
+            "planned": [
+                {"description": "Gym session", "linked_node": None, "completed": False},
+                {"description": "Read 30 pages", "linked_node": None, "completed": True},
+            ],
+            "completion_rate": 0.5,
+        })
+        result = agent._build_briefing_note(briefing, None)
+        assert "ACTIVE PLAN" in result
+        assert "Gym session" in result
+        assert "Read 30 pages" in result
+
+    def test_briefing_note_yesterday_review(self):
+        agent = self._agent()
+        briefing = self._briefing(
+            due_tasks=[{"node_id": "t1", "title": "Task", "priority": "medium", "project": None, "days_overdue": 0}],
+            yesterday_review={
+                "planned_count": 5,
+                "completed_count": 3,
+                "completion_rate": 0.6,
+                "missed": ["Evening Reading", "Meditation"],
+            },
+        )
+        result = agent._build_briefing_note(briefing, None)
+        assert "YESTERDAY'S REVIEW" in result
+        assert "Planned 5" in result
+        assert "Evening Reading" in result
+
+    def test_briefing_note_empty_day(self):
+        agent = self._agent()
+        briefing = self._briefing()
+        result = agent._build_briefing_note(briefing, None)
+        assert result == ""
+
+    def test_briefing_note_with_patterns(self):
+        agent = self._agent()
+        briefing = self._briefing(due_tasks=[{
+            "node_id": "t1", "title": "Task", "priority": "medium", "project": None, "days_overdue": 0,
+        }])
+        patterns = {
+            "planning_insight": "You tend to overcommit on Mondays.",
+            "days_with_plans": 10,
+        }
+        result = agent._build_briefing_note(briefing, patterns)
+        assert "PLANNING PATTERNS" in result
+        assert "overcommit on Mondays" in result
+
+    def test_briefing_note_stressed_condensed(self):
+        """Elevated stress + medium confidence → only events + top 2 due items."""
+        agent = self._agent()
+        briefing = self._briefing(
+            events=[{
+                "node_id": "dentist", "title": "Dentist",
+                "time": "14:00", "location": None, "people": [], "status": "upcoming",
+            }],
+            due_tasks=[
+                {"node_id": "t1", "title": "Task 1", "priority": "high", "project": None, "days_overdue": 0},
+                {"node_id": "t2", "title": "Task 2", "priority": "medium", "project": None, "days_overdue": 0},
+                {"node_id": "t3", "title": "Task 3", "priority": "low", "project": None, "days_overdue": 0},
+            ],
+            habit_targets=[{
+                "habit_id": "gym", "title": "Gym", "frequency": "daily",
+                "streak_status": "on_track", "current_streak": 5, "last_completed": None, "due_today": True,
+            }],
+        )
+        state = {"stress": "elevated", "energy": "low", "confidence": "medium", "signals": []}
+        result = agent._build_briefing_note(briefing, None, state=state)
+        # Should include events
+        assert "Dentist" in result
+        # Should include top 2 due tasks
+        assert "Task 1" in result
+        assert "Task 2" in result
+        # Should NOT include Task 3 (only top 2)
+        assert "Task 3" not in result
+        # Should NOT include habit targets in condensed mode
+        assert "HABIT TARGETS" not in result
+
+    def test_system_prompt_includes_briefing(self):
+        """System prompt contains TODAY'S BRIEFING when briefing is non-empty."""
+        agent = self._agent()
+        # Patch the methods used in chat()
+        from unittest.mock import MagicMock, patch
+
+        agent.get_context = MagicMock(return_value=("ctx", []))
+        agent.system_prompt_template = "Hello {context} {today}"
+        agent.mode_instructions = {"mirror": ""}
+        agent.client = MagicMock()
+        agent.client.messages.create = MagicMock(return_value=MagicMock(
+            content=[MagicMock(text="Hi there")]
+        ))
+        agent._parse_graph_updates = MagicMock(return_value=("Hi there", []))
+        agent._validate_types = MagicMock(return_value=[])
+
+        briefing = {
+            "date": "2026-03-23",
+            "day_of_week": "Monday",
+            "events": [{"node_id": "e1", "title": "Team Meeting",
+                        "time": "09:00", "location": None, "people": [], "status": "upcoming"}],
+            "due_tasks": [],
+            "habit_targets": [],
+            "active_plan": None,
+            "overdue_summary": {"count": 0, "top_items": []},
+            "fundamentals_status": {"neglected": [], "at_risk": []},
+            "yesterday_review": None,
+        }
+
+        with patch("mentor_agent.date") as mock_date:
+            mock_date.today.return_value = date(2026, 3, 23)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            agent.chat("Hello", [], briefing=briefing)
+
+        call_kwargs = agent.client.messages.create.call_args
+        system_arg = call_kwargs[1]["system"] if "system" in call_kwargs[1] else call_kwargs[0][2]
+        assert "TODAY'S BRIEFING" in system_arg
+
+
 # ── SOUL.md State Awareness parsed ──
 
 

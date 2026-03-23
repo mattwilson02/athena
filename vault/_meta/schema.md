@@ -221,6 +221,7 @@ impact: medium          # high | medium | low
 date:                   # The day this entry is for. ISO date.
 mood:                   # Optional. great | good | neutral | bad | terrible
 energy:                 # Optional. high | medium | low
+planned: []             # Optional. List of planned activities for this day.
 ```
 
 ### memory
