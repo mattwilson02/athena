@@ -15,9 +15,34 @@
   });
 
   function streakStatusLabel(status) {
-    if (status === 'on_track') return 'On Track';
-    if (status === 'at_risk') return 'At Risk';
-    return 'Broken';
+    const labels = {
+      on_track: 'On Track',
+      at_risk: 'At Risk',
+      broken: 'Broken',
+      relapsed: 'Relapsed',
+      early: 'Early',
+      strong: 'Strong',
+      unknown: 'Unknown',
+      upcoming: 'Upcoming',
+      overdue: 'Overdue',
+      no_data: 'No Data',
+    };
+    return labels[status] ?? 'Broken';
+  }
+
+  function streakCardClass(status) {
+    if (status === 'broken' || status === 'relapsed' || status === 'overdue') return 'broken';
+    if (status === 'at_risk' || status === 'early' || status === 'upcoming') return 'at-risk';
+    if (status === 'on_track' || status === 'strong') return 'on-track';
+    return '';
+  }
+
+  function formatDaysUntil(days) {
+    if (days == null) return '—';
+    if (days === 0) return 'today';
+    if (days < 0) return `${Math.abs(days)}d overdue`;
+    if (days === 1) return 'tomorrow';
+    return `in ${days}d`;
   }
 
   function formatDaysAgo(days) {
@@ -99,21 +124,52 @@
       {:else}
         <div class="streak-list">
           {#each data.streaks as streak}
-            <div class="streak-card" class:broken={streak.streak_status === 'broken'} class:at-risk={streak.streak_status === 'at_risk'} class:on-track={streak.streak_status === 'on_track'}>
+            {@const cardClass = streakCardClass(streak.streak_status)}
+            <div class="streak-card"
+                 class:broken={cardClass === 'broken'}
+                 class:at-risk={cardClass === 'at-risk'}
+                 class:on-track={cardClass === 'on-track'}>
               <div class="streak-header">
-                <span class="streak-title">{streak.habit_title}</span>
+                <div class="streak-title-row">
+                  <span class="streak-title">{streak.habit_title}</span>
+                  {#if streak.kind && streak.kind !== 'build'}
+                    <span class="streak-kind">{streak.kind}</span>
+                  {/if}
+                </div>
                 <span class="streak-badge {streak.streak_status}">{streakStatusLabel(streak.streak_status)}</span>
               </div>
               <div class="streak-meta">
-                <span class="streak-count">
-                  {#if streak.current_streak > 0}
-                    {streak.current_streak} streak
-                  {:else}
-                    No streak
+                {#if streak.kind === 'break'}
+                  <span class="streak-count">
+                    {#if streak.days_clean == null}
+                      No data
+                    {:else if streak.days_clean === 0}
+                      Day 0
+                    {:else}
+                      {streak.days_clean}d clean
+                    {/if}
+                  </span>
+                  <span class="streak-freq">{streak.frequency}</span>
+                  {#if streak.last_occurrence}
+                    <span class="streak-last">Last: {formatDate(streak.last_occurrence)}</span>
                   {/if}
-                </span>
-                <span class="streak-freq">{streak.frequency}</span>
-                <span class="streak-last">Last: {formatDaysAgo(streak.days_since_last)}</span>
+                {:else if streak.kind === 'periodic'}
+                  <span class="streak-freq">{streak.frequency}</span>
+                  <span class="streak-last">Last: {formatDate(streak.last_completed)}</span>
+                  {#if streak.next_due}
+                    <span class="streak-next-due">Next: {formatDate(streak.next_due)} ({formatDaysUntil(streak.days_until_due)})</span>
+                  {/if}
+                {:else}
+                  <span class="streak-count">
+                    {#if streak.current_streak > 0}
+                      {streak.current_streak} streak
+                    {:else}
+                      No streak
+                    {/if}
+                  </span>
+                  <span class="streak-freq">{streak.frequency}</span>
+                  <span class="streak-last">Last: {formatDaysAgo(streak.days_since_last)}</span>
+                {/if}
               </div>
             </div>
           {/each}
@@ -340,14 +396,32 @@
     gap: var(--space-sm);
   }
 
+  .streak-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex: 1;
+    overflow: hidden;
+  }
+
   .streak-title {
     font-size: var(--text-base);
     font-weight: 500;
     color: var(--text-primary);
-    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .streak-kind {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-muted);
+    background: var(--bg-surface-hover);
+    padding: 1px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    text-transform: capitalize;
   }
 
   .streak-badge {
@@ -358,19 +432,30 @@
     flex-shrink: 0;
   }
 
-  .streak-badge.on_track {
+  .streak-badge.on_track,
+  .streak-badge.strong {
     background: var(--success-soft);
     color: var(--success);
   }
 
-  .streak-badge.at_risk {
+  .streak-badge.at_risk,
+  .streak-badge.early,
+  .streak-badge.upcoming {
     background: var(--warning-soft);
     color: var(--warning);
   }
 
-  .streak-badge.broken {
+  .streak-badge.broken,
+  .streak-badge.relapsed,
+  .streak-badge.overdue {
     background: var(--error-soft);
     color: var(--error);
+  }
+
+  .streak-badge.unknown,
+  .streak-badge.no_data {
+    background: var(--bg-surface-hover);
+    color: var(--text-muted);
   }
 
   .streak-meta {
@@ -384,6 +469,11 @@
   .streak-count {
     font-weight: 600;
     color: var(--text-secondary);
+  }
+
+  .streak-next-due {
+    color: var(--text-secondary);
+    font-weight: 500;
   }
 
   /* Overdue cards */

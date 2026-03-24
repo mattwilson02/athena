@@ -1285,6 +1285,219 @@ class TestProactiveAlertsStateAware:
         assert count == 3
 
 
+class TestProactiveAlertsKindAware:
+    """Test kind-aware formatting in _build_proactive_alerts()."""
+
+    def _agent(self):
+        from unittest.mock import MagicMock
+        schema = {"type_list": ["goal", "task", "habit"], "types": {}}
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.schema = schema
+        agent.graph = MagicMock()
+        agent.vector_index = MagicMock()
+        agent.client = MagicMock()
+        agent.system_prompt_template = ""
+        agent.mode_instructions = {}
+        agent.model = "claude-test"
+        return agent
+
+    def _broken_build(self) -> dict:
+        return {
+            "habit_id": "strength-training",
+            "habit_title": "Strength Training",
+            "kind": "build",
+            "frequency": "3x/week",
+            "streak_status": "broken",
+            "last_completed": "2026-03-16",
+            "days_since_last": 8,
+            "days_clean": None,
+            "last_occurrence": None,
+            "next_due": None,
+            "days_until_due": None,
+        }
+
+    def _break_12_days(self) -> dict:
+        return {
+            "habit_id": "nicotine",
+            "habit_title": "Nicotine Pouches",
+            "kind": "break",
+            "frequency": "daily",
+            "streak_status": "on_track",
+            "days_clean": 12,
+            "last_occurrence": "2026-03-12",
+            "current_streak": None,
+            "last_completed": None,
+            "days_since_last": None,
+            "next_due": None,
+            "days_until_due": None,
+        }
+
+    def _break_relapsed(self) -> dict:
+        return {
+            "habit_id": "nicotine",
+            "habit_title": "Nicotine Pouches",
+            "kind": "break",
+            "streak_status": "relapsed",
+            "days_clean": 0,
+            "last_occurrence": "2026-03-24",
+            "current_streak": None,
+            "last_completed": None,
+            "days_since_last": None,
+            "next_due": None,
+            "days_until_due": None,
+        }
+
+    def _break_unknown(self) -> dict:
+        return {
+            "habit_id": "nicotine",
+            "habit_title": "Nicotine Pouches",
+            "kind": "break",
+            "streak_status": "unknown",
+            "days_clean": None,
+            "last_occurrence": None,
+            "current_streak": None,
+            "last_completed": None,
+            "days_since_last": None,
+            "next_due": None,
+            "days_until_due": None,
+        }
+
+    def _break_early(self) -> dict:
+        return {
+            "habit_id": "nicotine",
+            "habit_title": "Nicotine Pouches",
+            "kind": "break",
+            "streak_status": "early",
+            "days_clean": 3,
+            "last_occurrence": "2026-03-21",
+            "current_streak": None,
+            "last_completed": None,
+            "days_since_last": None,
+            "next_due": None,
+            "days_until_due": None,
+        }
+
+    def _periodic_upcoming(self) -> dict:
+        return {
+            "habit_id": "fasting",
+            "habit_title": "Periodic 48-Hour Fasting",
+            "kind": "periodic",
+            "frequency": "quarterly",
+            "streak_status": "upcoming",
+            "last_completed": "2026-03-16",
+            "next_due": "2026-06-14",
+            "days_until_due": 5,
+            "current_streak": None,
+            "days_clean": None,
+            "last_occurrence": None,
+            "days_since_last": None,
+        }
+
+    def _periodic_overdue(self) -> dict:
+        return {
+            "habit_id": "fasting",
+            "habit_title": "Periodic 48-Hour Fasting",
+            "kind": "periodic",
+            "frequency": "quarterly",
+            "streak_status": "overdue",
+            "last_completed": "2025-12-15",
+            "next_due": "2026-03-14",
+            "days_until_due": -10,
+            "current_streak": None,
+            "days_clean": None,
+            "last_occurrence": None,
+            "days_since_last": None,
+        }
+
+    def test_proactive_alerts_build_habit_broken(self):
+        """Build habit with broken status → 'streak broken' text."""
+        agent = self._agent()
+        alerts = {"broken_streaks": [self._broken_build()]}
+        result = agent._build_proactive_alerts(alerts)
+        assert "streak broken" in result
+        assert "Strength Training" in result
+
+    def test_proactive_alerts_break_habit_days_clean(self):
+        """Break habit 12 days clean → '12 days clean' text."""
+        agent = self._agent()
+        alerts = {"break_habits": [self._break_12_days()]}
+        result = agent._build_proactive_alerts(alerts)
+        assert "BREAK HABITS" in result
+        assert "12 days clean" in result
+        assert "Nicotine Pouches" in result
+
+    def test_proactive_alerts_break_habit_relapsed(self):
+        """Break habit 0 days → 'mentioned today. Day 0.' text."""
+        agent = self._agent()
+        alerts = {"break_habits": [self._break_relapsed()]}
+        result = agent._build_proactive_alerts(alerts)
+        assert "mentioned today" in result
+        assert "Day 0" in result
+
+    def test_proactive_alerts_break_habit_unknown(self):
+        """Break habit unknown → 'no usage data' text."""
+        agent = self._agent()
+        alerts = {"break_habits": [self._break_unknown()]}
+        result = agent._build_proactive_alerts(alerts)
+        assert "no usage data" in result
+
+    def test_proactive_alerts_break_habit_strong_suppressed(self):
+        """Break habit 30+ days clean (strong) → not in output (filtered by _build_alerts)."""
+        agent = self._agent()
+        # Strong habits are pre-filtered in _build_alerts; here we verify the section
+        # is absent when break_habits is empty
+        alerts = {"break_habits": []}
+        result = agent._build_proactive_alerts(alerts)
+        # No break_habits → no BREAK HABITS section
+        assert "BREAK HABITS" not in result
+
+    def test_proactive_alerts_periodic_upcoming(self):
+        """Periodic due in 5 days → 'Next due' text."""
+        agent = self._agent()
+        alerts = {"periodic_habits": [self._periodic_upcoming()]}
+        result = agent._build_proactive_alerts(alerts)
+        assert "PERIODIC HABITS" in result
+        assert "Periodic 48-Hour Fasting" in result
+        assert "Next due" in result
+
+    def test_proactive_alerts_periodic_overdue(self):
+        """Periodic overdue → 'Overdue by' text."""
+        agent = self._agent()
+        alerts = {"periodic_habits": [self._periodic_overdue()]}
+        result = agent._build_proactive_alerts(alerts)
+        assert "PERIODIC HABITS" in result
+        assert "Overdue by" in result
+
+    def test_proactive_alerts_mixed_kinds(self):
+        """Build broken + break early + periodic overdue → all three sections present."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [self._broken_build()],
+            "break_habits": [self._break_early()],
+            "periodic_habits": [self._periodic_overdue()],
+        }
+        result = agent._build_proactive_alerts(alerts)
+        assert "BROKEN STREAKS" in result
+        assert "BREAK HABITS" in result
+        assert "PERIODIC HABITS" in result
+
+    def test_proactive_alerts_break_early_not_suppressed_when_stressed(self):
+        """Stress elevated + break early → break early still shown."""
+        agent = self._agent()
+        alerts = {
+            "broken_streaks": [],
+            "break_habits": [self._break_early()],
+            "periodic_habits": [self._periodic_overdue()],
+        }
+        state = {"stress": "elevated", "energy": "normal", "confidence": "high", "signals": []}
+        result = agent._build_proactive_alerts(alerts, state=state)
+        # Early break habit should still appear even under stress
+        assert "BREAK HABITS" in result
+        assert "3 days clean" in result
+        # Periodic should be suppressed under elevated stress
+        assert "PERIODIC HABITS" not in result
+
+
 # ── SOUL.md State Awareness parsed ──
 
 

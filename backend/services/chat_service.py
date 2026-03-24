@@ -41,15 +41,35 @@ class ChatService:
     def _build_alerts(self) -> dict:
         """Compute accountability alerts (broken streaks, overdue commitments, fundamentals, relationships)."""
         try:
+            from flask import current_app
             from services.accountability_service import (
                 calculate_streaks, find_overdue_commitments, check_fundamentals,
             )
-            streaks = calculate_streaks(self.graph)
+            vault_root = current_app.config.get("VAULT_ROOT") or current_app.config.get("vault_root")
+            streaks = calculate_streaks(self.graph, vault_root=vault_root)
             overdue = find_overdue_commitments(self.graph, date.today())
-            fundamentals = check_fundamentals(self.graph, date.today())
+            fundamentals = check_fundamentals(self.graph, date.today(), vault_root=vault_root)
             alerts = {
-                "broken_streaks": [s for s in streaks if s["streak_status"] == "broken"],
-                "at_risk_streaks": [s for s in streaks if s["streak_status"] == "at_risk"],
+                # Build habits only for broken/at_risk buckets
+                "broken_streaks": [
+                    s for s in streaks
+                    if s.get("kind", "build") == "build" and s["streak_status"] == "broken"
+                ],
+                "at_risk_streaks": [
+                    s for s in streaks
+                    if s.get("kind", "build") == "build" and s["streak_status"] == "at_risk"
+                ],
+                # Break habits — exclude 'strong' (30+ days clean; stable, no alert needed)
+                "break_habits": [
+                    s for s in streaks
+                    if s.get("kind") == "break" and s.get("streak_status") != "strong"
+                ],
+                # Periodic habits — only upcoming/overdue need surfacing
+                "periodic_habits": [
+                    s for s in streaks
+                    if s.get("kind") == "periodic"
+                    and s.get("streak_status") in ("upcoming", "overdue")
+                ],
                 "overdue_commitments": overdue,
                 "neglected_fundamentals": [f for f in fundamentals if f["status"] == "neglected"],
                 "untracked_fundamentals": [f for f in fundamentals if f["status"] == "no_data"],

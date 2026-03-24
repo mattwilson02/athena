@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, timedelta
 
 from mentor_agent import _get_permanence
@@ -53,6 +54,12 @@ _ACTIVE_STATUSES = {
 # Edge types followed when tracing consequence chains.
 _CONSEQUENCE_EDGE_TYPES = {"supported_by", "part_of", "blocked_by", "relates_to"}
 
+# Stopwords removed when auto-deriving habit inference keywords from title.
+_STOPWORDS = {
+    "a", "an", "the", "to", "of", "for", "and", "or", "my", "i",
+    "is", "in", "on", "at", "with",
+}
+
 
 # ── Helpers ──
 
@@ -74,13 +81,15 @@ def _parse_date(val) -> date | None:
 def _get_frequency_window(frequency: str) -> int:
     """Return the window size in days for streak period calculation.
 
-    daily → 1, monthly → 30, everything else (weekly, 3x/week, etc.) → 7.
+    daily → 1, monthly → 30, quarterly → 90, everything else (weekly, 3x/week, etc.) → 7.
     """
     freq_lower = str(frequency).lower().strip()
     if freq_lower == "daily":
         return 1
     if freq_lower == "monthly":
         return 30
+    if freq_lower == "quarterly":
+        return 90
     return 7
 
 
@@ -141,16 +150,182 @@ def _calculate_streak_count(sorted_dates: list[date], window: int) -> int:
     return streak
 
 
+def _extract_habit_keywords(habit: dict) -> list[str]:
+    """Extract inference keywords from a habit's title, tags, and optional keywords field.
+
+    1. Split title into words, lowercase, remove stopwords.
+    2. Add all tags (lowercased).
+    3. Add any items from the 'keywords' frontmatter field.
+    4. Remove duplicates and filter out words shorter than 3 characters.
+    """
+    keywords: list[str] = []
+
+    # Words from title
+    title = (habit.get("title") or "").lower()
+    for word in title.split():
+        # Strip punctuation-like characters (e.g. "3x/week")
+        cleaned = word.strip(",.!?;:")
+        if cleaned and cleaned not in _STOPWORDS:
+            keywords.append(cleaned)
+
+    # Tags
+    tags = habit.get("tags") or []
+    for tag in tags:
+        keywords.append(str(tag).lower())
+
+    # Custom keywords from frontmatter
+    custom = habit.get("keywords") or []
+    for kw in custom:
+        keywords.append(str(kw).lower())
+
+    # Deduplicate and filter short words
+    seen: set[str] = set()
+    result: list[str] = []
+    for kw in keywords:
+        if kw not in seen and len(kw) >= 3:
+            seen.add(kw)
+            result.append(kw)
+
+    return result
+
+
+def _get_daily_content(node: dict, vault_root: str | None) -> str:
+    """Return body text for a daily node.
+
+    Checks node dict first (content / body field). Falls back to reading
+    the markdown file from vault_root when provided and content is absent.
+    """
+    content = node.get("content") or node.get("body") or ""
+    if content:
+        return content
+    if vault_root is None:
+        return ""
+    node_id = node.get("id", "")
+    if not node_id:
+        return ""
+    file_path = os.path.join(vault_root, "Life", "Daily", f"{node_id}.md")
+    try:
+        with open(file_path, encoding="utf-8") as fh:
+            raw = fh.read()
+        # Extract body text — everything after the closing frontmatter ---
+        parts = raw.split("---", 2)
+        if len(parts) >= 3:
+            return parts[2]
+        return raw
+    except OSError:
+        return ""
+
+
+def infer_habit_completions(
+    graph, habit: dict, vault_root: str | None = None
+) -> list[date]:
+    """Scan daily node body text for mentions of a habit; return matched dates.
+
+    Uses keyword matching (case-insensitive substring) against keywords
+    derived from the habit's title, tags, and optional 'keywords' field.
+
+    Returns a list of dates (may contain duplicates — caller deduplicates).
+    """
+    keywords = _extract_habit_keywords(habit)
+    if not keywords:
+        return []
+
+    results: list[date] = []
+
+    for daily in graph.get_nodes_by_type("daily"):
+        d = _parse_date(daily.get("date"))
+        if d is None:
+            continue
+
+        content = _get_daily_content(daily, vault_root).lower()
+        if not content:
+            continue
+
+        if any(kw in content for kw in keywords):
+            results.append(d)
+
+    return results
+
+
+# ── Break / Periodic streak helpers ──
+
+
+def _streak_for_break(unique_dates: list[date], today: date) -> dict:
+    """Compute break-habit metrics: days_clean, last_occurrence, streak_status.
+
+    unique_dates: deduplicated completion (i.e. relapse) dates, most recent first.
+    For break habits, a date means the habit was performed — which is bad.
+    days_clean = days since the most recent occurrence.
+    """
+    if not unique_dates:
+        return {
+            "days_clean": None,
+            "last_occurrence": None,
+            "streak_status": "unknown",
+        }
+
+    last = unique_dates[0]
+    days_clean = (today - last).days
+
+    if days_clean == 0:
+        status = "relapsed"
+    elif days_clean <= 7:
+        status = "early"
+    elif days_clean < 30:
+        status = "on_track"
+    else:
+        status = "strong"
+
+    return {
+        "days_clean": days_clean,
+        "last_occurrence": last.isoformat(),
+        "streak_status": status,
+    }
+
+
+def _streak_for_periodic(unique_dates: list[date], today: date, frequency: str) -> dict:
+    """Compute periodic-habit metrics: last_completed, next_due, days_until_due, streak_status."""
+    if not unique_dates:
+        return {
+            "last_completed": None,
+            "next_due": None,
+            "days_until_due": None,
+            "streak_status": "no_data",
+        }
+
+    last = unique_dates[0]
+    window = _get_frequency_window(frequency)
+    next_due = last + timedelta(days=window)
+    days_until_due = (next_due - today).days
+
+    if days_until_due > 7:
+        status = "on_track"
+    elif days_until_due > 0:
+        status = "upcoming"
+    else:
+        status = "overdue"
+
+    return {
+        "last_completed": last.isoformat(),
+        "next_due": next_due.isoformat(),
+        "days_until_due": days_until_due,
+        "streak_status": status,
+    }
+
+
 # ── Public API ──
 
 
-def calculate_streaks(graph) -> list[dict]:
-    """Compute current habit streaks from linked daily nodes.
+def calculate_streaks(graph, vault_root: str | None = None) -> list[dict]:
+    """Compute current habit streaks from linked daily nodes and content inference.
 
-    Returns a list of streak reports sorted by urgency:
-    broken first, then at_risk, then on_track.
+    Returns a list of streak reports sorted by urgency across all kinds:
+    broken/relapsed/overdue first, then at_risk/early/upcoming, then on_track/strong/unknown/no_data.
+
+    vault_root: when provided, augments edge-based dates with content inference.
     """
     results = []
+    today = date.today()
 
     for habit in graph.get_nodes_by_type("habit"):
         status = str(habit.get("status", "active") or "active").lower()
@@ -159,8 +334,9 @@ def calculate_streaks(graph) -> list[dict]:
 
         habit_id = habit["id"]
         frequency = habit.get("frequency") or "weekly"
+        kind = str(habit.get("kind") or "build").lower()
 
-        # Collect linked daily node dates via any edge type.
+        # 1. Collect edge-based daily node dates.
         linked_dates: list[date] = []
         seen_ids: set[str] = set()
 
@@ -174,42 +350,71 @@ def calculate_streaks(graph) -> list[dict]:
                 if d is not None:
                     linked_dates.append(d)
 
-        # Deduplicate dates and sort most recent first.
+        # 2. Augment with content inference when vault_root provided.
+        if vault_root is not None:
+            inferred = infer_habit_completions(graph, habit, vault_root)
+            linked_dates.extend(inferred)
+
+        # Deduplicate and sort most recent first.
         unique_dates = sorted(set(linked_dates), reverse=True)
-        today = date.today()
 
-        if not unique_dates:
-            results.append({
-                "habit_id": habit_id,
-                "habit_title": habit.get("title", habit_id),
-                "frequency": frequency,
-                "status": status,
-                "current_streak": 0,
-                "last_completed": None,
-                "days_since_last": None,
-                "streak_status": "broken",
-            })
-            continue
-
-        last_completed = unique_dates[0]
-        days_since_last = (today - last_completed).days
-        window = _get_frequency_window(frequency)
-        streak = _calculate_streak_count(unique_dates, window)
-        status_str = _streak_status(days_since_last, frequency)
-
-        results.append({
+        # 3. Build base result dict with all fields (None for non-applicable).
+        base = {
             "habit_id": habit_id,
             "habit_title": habit.get("title", habit_id),
             "frequency": frequency,
             "status": status,
-            "current_streak": streak,
-            "last_completed": last_completed.isoformat(),
-            "days_since_last": days_since_last,
-            "streak_status": status_str,
-        })
+            "kind": kind,
+            # Build fields
+            "current_streak": None,
+            "last_completed": None,
+            "days_since_last": None,
+            # Break fields
+            "days_clean": None,
+            "last_occurrence": None,
+            # Periodic fields (last_completed shared with build)
+            "next_due": None,
+            "days_until_due": None,
+            # Shared
+            "streak_status": "broken",
+        }
 
-    # Sort by urgency: broken → at_risk → on_track.
-    _URGENCY = {"broken": 0, "at_risk": 1, "on_track": 2}
+        # 4. Branch on kind.
+        if kind == "break":
+            metrics = _streak_for_break(unique_dates, today)
+            base.update(metrics)
+
+        elif kind == "periodic":
+            metrics = _streak_for_periodic(unique_dates, today, frequency)
+            base.update(metrics)
+
+        else:
+            # Build (default)
+            if not unique_dates:
+                base["streak_status"] = "broken"
+                base["current_streak"] = 0
+            else:
+                last_completed = unique_dates[0]
+                days_since_last = (today - last_completed).days
+                window = _get_frequency_window(frequency)
+                streak = _calculate_streak_count(unique_dates, window)
+                status_str = _streak_status(days_since_last, frequency)
+                base.update({
+                    "current_streak": streak,
+                    "last_completed": last_completed.isoformat(),
+                    "days_since_last": days_since_last,
+                    "streak_status": status_str,
+                })
+
+        results.append(base)
+
+    # Sort by urgency across all kinds:
+    # relapsed/broken/overdue → 0, at_risk/early/upcoming → 1, rest → 2
+    _URGENCY = {
+        "broken": 0, "relapsed": 0, "overdue": 0,
+        "at_risk": 1, "early": 1, "upcoming": 1,
+        "on_track": 2, "strong": 2, "no_data": 2, "unknown": 2,
+    }
     results.sort(key=lambda r: _URGENCY.get(r["streak_status"], 2))
     return results
 
@@ -328,7 +533,7 @@ def _habit_matches_fundamental(habit: dict, keywords: list[str]) -> bool:
 
 
 def check_fundamentals(
-    graph, today: date, include_active: bool = False
+    graph, today: date, include_active: bool = False, vault_root: str | None = None
 ) -> list[dict]:
     """Check whether core human needs have been neglected for 2+ weeks.
 
@@ -341,6 +546,8 @@ def check_fundamentals(
         today: Reference date for recency calculations.
         include_active: If True, also return active (≤14 days) fundamentals.
                         Default False — only neglected and no_data are returned.
+        vault_root: When provided, augments edge-based dates with content inference
+                    for more accurate activity detection.
 
     Returns:
         List of fundamental reports with keys:
@@ -381,6 +588,12 @@ def check_fundamentals(
                     d = _parse_date(neighbor.get("date"))
                     if d is not None:
                         all_daily_dates.append(d)
+
+        # Augment with content inference when vault_root provided.
+        if vault_root is not None:
+            for habit in matched_habits:
+                inferred = infer_habit_completions(graph, habit, vault_root)
+                all_daily_dates.extend(inferred)
 
         if not all_daily_dates:
             # Habits exist but no dailies recorded — treat as neglected

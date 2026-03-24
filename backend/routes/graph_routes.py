@@ -144,8 +144,9 @@ def activity():
 def get_accountability():
     """Return current accountability state: streaks, overdue commitments, fundamentals, summary."""
     g = current_app.config["graph"]
+    vault_root = current_app.config.get("VAULT_ROOT") or current_app.config.get("vault_root")
     try:
-        streaks = calculate_streaks(g)
+        streaks = calculate_streaks(g, vault_root=vault_root)
         overdue = find_overdue_commitments(g, _date.today())
     except Exception:
         logger.exception("Accountability service error")
@@ -153,15 +154,40 @@ def get_accountability():
 
     try:
         # include_active=True so the dashboard shows a complete picture of all 6 fundamentals
-        fundamentals = check_fundamentals(g, _date.today(), include_active=True)
+        fundamentals = check_fundamentals(g, _date.today(), include_active=True, vault_root=vault_root)
     except Exception:
         logger.exception("Fundamentals check error")
         return jsonify({"error": "Failed to compute fundamentals state"}), 500
 
-    on_track = sum(1 for s in streaks if s["streak_status"] == "on_track")
-    at_risk = sum(1 for s in streaks if s["streak_status"] == "at_risk")
-    broken = sum(1 for s in streaks if s["streak_status"] == "broken")
+    # Build habits: count on_track/at_risk/broken for backward-compatible summary.
+    build_habits = [s for s in streaks if s.get("kind", "build") == "build"]
+    on_track = sum(1 for s in build_habits if s["streak_status"] == "on_track")
+    at_risk = sum(1 for s in build_habits if s["streak_status"] == "at_risk")
+    broken = sum(1 for s in build_habits if s["streak_status"] == "broken")
     oldest_overdue = max((o["days_overdue"] for o in overdue), default=0)
+
+    # by_kind breakdown
+    break_habits = [s for s in streaks if s.get("kind") == "break"]
+    periodic_habits = [s for s in streaks if s.get("kind") == "periodic"]
+    break_clean_vals = [s["days_clean"] for s in break_habits if s.get("days_clean") is not None]
+    break_clean_avg = (sum(break_clean_vals) / len(break_clean_vals)) if break_clean_vals else None
+    by_kind = {
+        "build": {
+            "total": len(build_habits),
+            "on_track": on_track,
+            "at_risk": at_risk,
+            "broken": broken,
+        },
+        "break": {
+            "total": len(break_habits),
+            "days_clean_avg": break_clean_avg,
+        },
+        "periodic": {
+            "total": len(periodic_habits),
+            "on_track": sum(1 for s in periodic_habits if s.get("streak_status") == "on_track"),
+            "overdue": sum(1 for s in periodic_habits if s.get("streak_status") == "overdue"),
+        },
+    }
 
     f_active = sum(1 for f in fundamentals if f["status"] == "active")
     f_neglected = sum(1 for f in fundamentals if f["status"] == "neglected")
@@ -211,6 +237,7 @@ def get_accountability():
             "broken": broken,
             "overdue_count": len(overdue),
             "oldest_overdue_days": oldest_overdue,
+            "by_kind": by_kind,
         },
         "fundamentals": fundamentals,
         "fundamentals_summary": {

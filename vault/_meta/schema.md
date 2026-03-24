@@ -81,9 +81,11 @@ priority: core          # core | important | aspirational
 - **Description:** A recurring behavior — good or bad.
 - **Frontmatter:**
 ```yaml
-frequency: daily        # daily | weekly | monthly
-status: active          # active | lapsed | building
+frequency: daily        # daily | weekly | monthly | quarterly
+status: active          # active | lapsed | building | quitting
+kind: build             # build | break | periodic
 streak: 0              # Optional. Current streak count.
+keywords: []           # Optional. Custom inference keywords beyond title/tags.
 ```
 
 ### skill
