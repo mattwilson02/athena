@@ -2,6 +2,8 @@
 
 > Pre-planned epoch sequence from current state to Stage 1 completion.
 > Mapped on 2026-03-02. See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for the gap assessment this is built on.
+>
+> **Status: Stage 1 complete (2026-03-24).** All 6 epochs shipped. See "What's Parked" for Stage 2 scope.
 
 ---
 
@@ -227,10 +229,11 @@ Rethink the type system from scratch. Current 27 types grew organically with unc
 
 ---
 
-## E6: "Reading the Room"
+## E6: "Reading the Room" ✓
 
 > After this epoch, Athena reads between the lines. Short messages mean stress. It adapts. Relationships become dynamics, not contact cards.
 
+**Status:** Complete (2026-03-24). Shipped across sprints 5-9.
 **Dependencies:** E5 (accountability data enables behavioral pattern detection)
 
 ### In Scope
