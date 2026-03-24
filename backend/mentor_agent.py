@@ -664,6 +664,17 @@ def _recency_score(node: dict) -> float:
     return 1.0 - (days_ago / 90.0)
 
 
+def _format_periodic_date(iso_date: str | None) -> str:
+    """Format an ISO date string as a short human-readable date (e.g. 'Mar 16')."""
+    if not iso_date:
+        return "unknown"
+    try:
+        d = datetime.fromisoformat(iso_date).date()
+        return d.strftime("%b %-d")
+    except (ValueError, AttributeError):
+        return iso_date
+
+
 def _format_date_context(node: dict, today: date | None = None) -> str:
     """Compute human-readable date-relative facts for a node's date fields.
 
@@ -1719,6 +1730,7 @@ class MentorAgent:
         Returns an empty string when there is nothing to surface.
         Caps at 5 broken streaks + 3 overdue commitments to avoid prompt bloat.
         State-aware suppression: elevated stress → 1 total alert; low energy → 2 total.
+        Break habits in 'early' status always shown regardless of stress.
         """
         broken = alerts.get("broken_streaks", [])[:5]
         at_risk = alerts.get("at_risk_streaks", [])
@@ -1728,6 +1740,10 @@ class MentorAgent:
         drifting_rels = alerts.get("drifting_relationships", [])[:2]
         neglected_rels = alerts.get("neglected_relationships", [])[:2]
         high_influence = alerts.get("high_influence", [])[:3]
+        # Break habits (strong already filtered by _build_alerts)
+        break_habits = list(alerts.get("break_habits", []))
+        # Periodic habits (upcoming/overdue only)
+        periodic_habits = list(alerts.get("periodic_habits", []))
 
         # State-aware suppression
         _state = state or {}
@@ -1757,6 +1773,9 @@ class MentorAgent:
                 drifting_rels = []
                 neglected_rels = []
                 high_influence = []
+                # Break habits: always show 'early' status even when stressed; suppress others
+                break_habits = [b for b in break_habits if b.get("streak_status") == "early"]
+                periodic_habits = []
             else:
                 remaining = max(0, total_cap - len(overdue) - len(broken) - len(at_risk))
                 neglected = neglected[:remaining]
@@ -1777,6 +1796,7 @@ class MentorAgent:
             not broken and not at_risk and not overdue
             and not neglected and not untracked
             and not rel_section
+            and not break_habits and not periodic_habits
         ):
             return ""
 
@@ -1807,6 +1827,45 @@ class MentorAgent:
                     f'- "{s["habit_title"]}" — last completed {days} day{"s" if days != 1 else ""} ago, '
                     f"at risk of breaking ({freq} frequency)."
                 )
+
+        if break_habits:
+            lines.append("\nBREAK HABITS:")
+            for s in break_habits:
+                title = s["habit_title"]
+                bstatus = s.get("streak_status", "unknown")
+                days_clean = s.get("days_clean")
+                if bstatus == "relapsed":
+                    lines.append(f'- "{title}" — mentioned today. Day 0.')
+                elif bstatus == "unknown" or days_clean is None:
+                    lines.append(f'- "{title}" — no usage data. Can\'t determine days clean.')
+                else:
+                    days_str = f"{days_clean} day{'s' if days_clean != 1 else ''} clean"
+                    if bstatus == "early":
+                        lines.append(f'- "{title}" — {days_str}. Stay strong — early window is fragile.')
+                    else:
+                        lines.append(f'- "{title}" — {days_str}. Keep going.')
+
+        if periodic_habits:
+            lines.append("\nPERIODIC HABITS:")
+            for s in periodic_habits:
+                title = s["habit_title"]
+                pstatus = s.get("streak_status", "no_data")
+                last = s.get("last_completed")
+                next_due = s.get("next_due")
+                days_until = s.get("days_until_due")
+                if pstatus == "overdue":
+                    overdue_days = abs(days_until) if days_until is not None else "?"
+                    last_str = _format_periodic_date(last) if last else "unknown"
+                    lines.append(
+                        f'- "{title}" — last completed {last_str}. Overdue by {overdue_days} day{"s" if overdue_days != 1 else ""}.'
+                    )
+                elif pstatus == "upcoming":
+                    next_str = _format_periodic_date(next_due) if next_due else "soon"
+                    lines.append(f'- "{title}" — Next due: {next_str} ({days_until} days).')
+                else:
+                    next_str = _format_periodic_date(next_due) if next_due else "unknown"
+                    days_str = f"{days_until} days" if days_until is not None else "?"
+                    lines.append(f'- "{title}" — Next due: {next_str} ({days_str}).')
 
         if overdue:
             lines.append("\nOVERDUE COMMITMENTS:")

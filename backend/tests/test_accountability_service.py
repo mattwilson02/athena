@@ -665,3 +665,44 @@ class TestCheckFundamentals:
         result = check_fundamentals(graph, today)
         movement_entries = [f for f in result if f["fundamental"] == "movement"]
         assert "gym-h" in movement_entries[0]["related_habits"]
+
+
+class TestFundamentalsContentInference:
+    """check_fundamentals with content inference via vault_root."""
+
+    def test_fundamentals_content_inference(self):
+        """Habit with no edges but daily content mentions activity → not neglected."""
+        today = date.today()
+        recent = (today - timedelta(days=2)).isoformat()
+        habit = {"id": "gym", "type": "habit", "title": "Strength Training",
+                 "tags": ["training", "fitness"], "status": "active", "content": ""}
+        # Daily has content referencing training but no edge to habit
+        daily = {
+            "id": "d1", "type": "daily", "date": recent,
+            "content": "training session completed",
+        }
+        graph = FakeGraph([habit, daily], [])  # No edges
+        # vault_root="." enables content inference; content is in node dict so no file reading
+        result = check_fundamentals(graph, today, include_active=True, vault_root=".")
+        movement = [f for f in result if f["fundamental"] == "movement"]
+        # Should be active — content inference found the recent training mention
+        assert len(movement) == 1
+        assert movement[0]["status"] == "active"
+
+    def test_fundamentals_without_vault_root_edge_only(self):
+        """Without vault_root, only edge-based dates count (backward compat)."""
+        today = date.today()
+        old = (today - timedelta(days=20)).isoformat()
+        habit = {"id": "gym", "type": "habit", "title": "Strength Training",
+                 "tags": ["training"], "status": "active", "content": ""}
+        # Daily with content but no edge — would be found by inference but vault_root=None
+        daily_content_only = {
+            "id": "d1", "type": "daily", "date": old,
+            "content": "training completed",
+        }
+        graph = FakeGraph([habit, daily_content_only], [])
+        # vault_root=None → content inference disabled → no dates found → neglected
+        result = check_fundamentals(graph, today, vault_root=None)
+        movement = [f for f in result if f["fundamental"] == "movement"]
+        assert len(movement) == 1
+        assert movement[0]["status"] == "neglected"

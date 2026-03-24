@@ -947,3 +947,80 @@ class TestRelationshipPersistenceThrottle:
 
         # Persistence should have run at most once
         assert len(persist_calls) <= 1
+
+
+# ── Kind-Aware Accountability Tests ──────────────────────────────────────
+
+
+class TestAccountabilityKindAware:
+    """Test kind-aware fields in GET /api/accountability response."""
+
+    def test_accountability_endpoint_includes_kind(self, client):
+        """Streak entries returned by the endpoint include a 'kind' field."""
+        from unittest.mock import patch
+
+        fake_streaks = [
+            {
+                "habit_id": "strength-training",
+                "habit_title": "Strength Training",
+                "frequency": "3x/week",
+                "status": "active",
+                "kind": "build",
+                "current_streak": 2,
+                "last_completed": "2026-03-22",
+                "days_since_last": 2,
+                "days_clean": None,
+                "last_occurrence": None,
+                "next_due": None,
+                "days_until_due": None,
+                "streak_status": "on_track",
+            }
+        ]
+        with patch("routes.graph_routes.calculate_streaks", return_value=fake_streaks):
+            resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data["streaks"]) == 1
+        assert "kind" in data["streaks"][0]
+        assert data["streaks"][0]["kind"] == "build"
+
+    def test_accountability_summary_by_kind(self, client):
+        """Summary includes a by_kind breakdown."""
+        resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "by_kind" in data["summary"]
+        by_kind = data["summary"]["by_kind"]
+        assert "build" in by_kind
+        assert "break" in by_kind
+        assert "periodic" in by_kind
+
+    def test_accountability_break_habit_days_clean(self, client):
+        """Break habit entry has days_clean field in the response."""
+        from unittest.mock import patch
+
+        fake_streaks = [
+            {
+                "habit_id": "nicotine",
+                "habit_title": "Nicotine Pouches",
+                "frequency": "daily",
+                "status": "quitting",
+                "kind": "break",
+                "current_streak": None,
+                "last_completed": None,
+                "days_since_last": None,
+                "days_clean": 12,
+                "last_occurrence": "2026-03-12",
+                "next_due": None,
+                "days_until_due": None,
+                "streak_status": "on_track",
+            }
+        ]
+        with patch("routes.graph_routes.calculate_streaks", return_value=fake_streaks):
+            resp = client.get("/api/accountability")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data["streaks"]) == 1
+        streak = data["streaks"][0]
+        assert "days_clean" in streak
+        assert streak["days_clean"] == 12
