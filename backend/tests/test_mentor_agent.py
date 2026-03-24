@@ -22,6 +22,8 @@ from mentor_agent import (
     _STATUS_PENALTIES,
     _node_context_compact,
     _node_context_full,
+    _node_context_oneliner,
+    _BASE_TOKEN_BUDGET,
     _MAX_CONTEXT_TOKENS,
     _CHARS_PER_TOKEN,
     build_system_prompt,
@@ -2130,3 +2132,206 @@ class TestPersonContextEnrichment:
         rel_data = {"ethan": self._rel_stats()}
         context, _ = agent.get_context("what about Ethan", relationship_data=rel_data)
         assert "Mentions:" in context
+
+
+# ---------------------------------------------------------------------------
+# _node_context_oneliner (Task 4)
+# ---------------------------------------------------------------------------
+
+class TestNodeContextOneliner:
+    """Tests for _node_context_oneliner format function."""
+
+    def test_node_context_oneliner_daily_format(self):
+        """Daily node with date → output starts with formatted date."""
+        node = {
+            "id": "daily-1",
+            "type": "daily",
+            "title": "Training day",
+            "date": "2026-03-16",
+            "content": "Upper body session and portfolio review.",
+            "status": "active",
+        }
+        result = _node_context_oneliner(node)
+        # Should start with a short weekday + day + month pattern
+        assert "Mar" in result
+        assert "16" in result
+        assert "[daily]" in result
+        assert "Training day" in result
+
+    def test_node_context_oneliner_goal_format(self):
+        """Goal node → includes status and priority metadata."""
+        node = {
+            "id": "goal-piano",
+            "type": "goal",
+            "title": "Learn Piano",
+            "status": "active",
+            "priority": "high",
+            "due": "2026-06-01",
+            "content": "Reach intermediate level.",
+        }
+        result = _node_context_oneliner(node)
+        assert "[goal]" in result
+        assert "Learn Piano" in result
+        assert "active" in result
+        assert "high priority" in result
+
+    def test_node_context_oneliner_length(self):
+        """Typical node → output length within 50-120 chars."""
+        node = {
+            "id": "daily-2",
+            "type": "daily",
+            "title": "Monday journal",
+            "date": "2026-03-17",
+            "content": "Productive morning. Finished sprint planning.",
+            "status": "active",
+        }
+        result = _node_context_oneliner(node)
+        # Allow a slightly wider range to account for real-world variation
+        assert len(result) <= 120, f"Oneliner too long: {len(result)} chars — '{result}'"
+        assert len(result) >= 10, f"Oneliner too short: {len(result)} chars"
+
+    def test_node_context_oneliner_title_truncation(self):
+        """Title longer than 30 chars → truncated with '...'"""
+        node = {
+            "id": "goal-long",
+            "type": "goal",
+            "title": "This is a very long title that exceeds thirty characters",
+            "status": "active",
+        }
+        result = _node_context_oneliner(node)
+        assert "..." in result
+        # Title part in the result should be ≤33 chars (30 + "...")
+        type_tag = "[goal] "
+        title_part = result.split(" — ")[0].replace(type_tag, "").strip()
+        assert len(title_part) <= 33
+
+    def test_oneliner_threshold_at_13(self, tmp_path):
+        """13 compact nodes (>12) → oneliner format used in assembly."""
+        from unittest.mock import MagicMock
+        from vault_graph import VaultGraph
+        from vector_search import VectorIndex
+
+        nodes = []
+        for i in range(13):
+            nodes.append({
+                "id": f"daily-{i}",
+                "type": "daily",
+                "title": f"Daily {i}",
+                "date": f"2026-03-{i+1:02d}",
+                "content": f"Content for day {i}.",
+                "status": "active",
+            })
+
+        g = VaultGraph()
+        g.build_from_parsed(nodes, [])
+        vi = VectorIndex(str(tmp_path / "chroma"))
+        vi.index_all(nodes)
+
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.graph = g
+        agent.vector_index = vi
+        agent.schema = {
+            "type_list": ["daily"],
+            "types": {"daily": {"domain": "Life"}},
+            "domains": {"Life": {"types": ["daily"]}},
+        }
+        agent.client = MagicMock()
+        agent.system_prompt_template = "test {context} {today}"
+        agent.model = "test-model"
+        agent.mode_instructions = {}
+
+        # Use a broad temporal query to trigger compact=True + many nodes
+        from unittest.mock import patch
+        from datetime import date
+        frozen = date(2026, 3, 23)
+        with patch("mentor_agent.date") as mock_date:
+            mock_date.today.return_value = frozen
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            debug = agent.get_context_debug("what happened this week")
+
+        # With >12 nodes and compact=True, format_used should be oneliner
+        assert debug["format_used"] == "oneliner"
+
+    def test_compact_threshold_at_12(self, tmp_path):
+        """Exactly 12 compact nodes → compact format, NOT oneliner."""
+        from unittest.mock import MagicMock
+        from vault_graph import VaultGraph
+        from vector_search import VectorIndex
+        from unittest.mock import patch
+        from datetime import date
+
+        nodes = []
+        for i in range(12):
+            nodes.append({
+                "id": f"daily-{i}",
+                "type": "daily",
+                "title": f"Daily {i}",
+                "date": f"2026-03-{i+1:02d}",
+                "content": f"Content for day {i}.",
+                "status": "active",
+            })
+
+        g = VaultGraph()
+        g.build_from_parsed(nodes, [])
+        vi = VectorIndex(str(tmp_path / "chroma"))
+        vi.index_all(nodes)
+
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.graph = g
+        agent.vector_index = vi
+        agent.schema = {
+            "type_list": ["daily"],
+            "types": {"daily": {"domain": "Life"}},
+            "domains": {"Life": {"types": ["daily"]}},
+        }
+        agent.client = MagicMock()
+        agent.system_prompt_template = "test {context} {today}"
+        agent.model = "test-model"
+        agent.mode_instructions = {}
+
+        frozen = date(2026, 3, 23)
+        with patch("mentor_agent.date") as mock_date:
+            mock_date.today.return_value = frozen
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            debug = agent.get_context_debug("what happened this week")
+
+        # 12 nodes → compact, not oneliner (threshold is >12)
+        assert debug["format_used"] in ("compact", "full")
+
+    def test_non_compact_never_oneliner(self, tmp_path):
+        """Non-compact intent with many nodes → full format, not oneliner."""
+        from unittest.mock import MagicMock
+        from vault_graph import VaultGraph
+        from vector_search import VectorIndex
+
+        nodes = []
+        for i in range(15):
+            nodes.append({
+                "id": f"goal-{i}",
+                "type": "goal",
+                "title": f"Goal {i}",
+                "content": f"I want to achieve goal {i}.",
+                "status": "active",
+            })
+
+        g = VaultGraph()
+        g.build_from_parsed(nodes, [])
+        vi = VectorIndex(str(tmp_path / "chroma"))
+        vi.index_all(nodes)
+
+        agent = MentorAgent.__new__(MentorAgent)
+        agent.graph = g
+        agent.vector_index = vi
+        agent.schema = {
+            "type_list": ["goal"],
+            "types": {"goal": {"domain": "Self"}},
+            "domains": {"Self": {"types": ["goal"]}},
+        }
+        agent.client = MagicMock()
+        agent.system_prompt_template = "test {context} {today}"
+        agent.model = "test-model"
+        agent.mode_instructions = {}
+
+        # Entity lookup → compact=False, regardless of node count
+        debug = agent.get_context_debug("tell me about my goals and ambitions in life")
+        assert debug["format_used"] == "full"
