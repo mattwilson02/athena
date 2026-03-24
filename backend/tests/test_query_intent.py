@@ -230,3 +230,63 @@ class TestIntentOutputShape:
         assert "compact" in result
         assert "pre_filter" in result
         assert "scoring_adjustments" in result
+
+
+# ---------------------------------------------------------------------------
+# relational intent (Task 1)
+# ---------------------------------------------------------------------------
+
+class TestRelationalIntent:
+
+    def test_relational_explicit_signal(self):
+        """Explicit relational signal phrase → relational intent."""
+        result = _intent("how's my relationship with ben")
+        assert result["intent"] == "relational"
+
+    def test_relational_entity_plus_people_domain(self):
+        """Entity signal + People domain in top domains → relational."""
+        result = _intent("tell me about sarah", domains=["People"])
+        assert result["intent"] == "relational"
+
+    def test_relational_who_is_person(self):
+        """'who is' + People domain → relational."""
+        result = _intent("who is ethan", domains=["People"])
+        assert result["intent"] == "relational"
+
+    def test_relational_does_not_match_non_person(self):
+        """Entity signal without People domain → entity_lookup, not relational."""
+        result = _intent("tell me about piano", domains=["Knowledge"])
+        assert result["intent"] == "entity_lookup"
+
+    def test_relational_loses_to_temporal(self):
+        """Temporal signal + date range takes priority over relational."""
+        result = _intent("what did i do with ben this week", date_range=THIS_WEEK)
+        assert result["intent"] == "temporal_broad"
+
+    def test_relational_expand_person_flag(self):
+        """Relational intent includes expand_person=True."""
+        result = _intent("how's my relationship with ben")
+        assert result.get("expand_person") is True
+
+    def test_relational_k_and_compact(self):
+        """Relational intent has k=5 and compact=True."""
+        result = _intent("dynamics with my team")
+        assert result["k"] == 5
+        assert result["compact"] is True
+
+    def test_relational_dynamics_with(self):
+        """'dynamics with' phrase triggers relational."""
+        result = _intent("dynamics with my team")
+        assert result["intent"] == "relational"
+
+    def test_relational_history_with(self):
+        """'history with' phrase triggers relational."""
+        result = _intent("history with my old mentor")
+        assert result["intent"] == "relational"
+
+    def test_relational_scoring_adjustments(self):
+        """Relational intent has centrality and session multipliers."""
+        result = _intent("how's my relationship with ben")
+        adj = result["scoring_adjustments"]
+        assert adj.get("centrality_multiplier", 1.0) >= 2.0
+        assert adj.get("session_multiplier", 1.0) >= 1.0

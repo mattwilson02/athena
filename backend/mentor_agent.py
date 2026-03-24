@@ -146,6 +146,12 @@ _INTENT_ENTITY_SIGNALS: list[str] = [
     "tell me about", "what is", "who is", "details on", "more about",
 ]
 
+_INTENT_RELATIONAL_SIGNALS: list[str] = [
+    "relationship with", "how's my relationship", "dynamics with",
+    "history with", "interactions with", "how do i know",
+    "what's my relationship", "how are things with",
+]
+
 
 def classify_query_intent(
     query: str,
@@ -248,6 +254,21 @@ def classify_query_intent(
             },
         }
 
+    # ── 3.5. relational ──
+    has_relational_signal = any(sig in q for sig in _INTENT_RELATIONAL_SIGNALS)
+    if has_relational_signal or (has_entity_signal and "People" in domains):
+        return {
+            "intent": "relational",
+            "k": 5,
+            "compact": True,
+            "pre_filter": None,
+            "scoring_adjustments": {
+                "centrality_multiplier": 2.0,
+                "session_multiplier": 1.5,
+            },
+            "expand_person": True,
+        }
+
     # ── 4. entity_lookup ──
     if has_entity_signal or len(q) < 40:
         return {
@@ -274,9 +295,41 @@ def classify_query_intent(
 # Bootstrap threshold — below this, inject onboarding prompt instead of retrieval.
 _BOOTSTRAP_THRESHOLD = 10
 
-# Rough token budget for the context window.
-_MAX_CONTEXT_TOKENS = 3000
-_CHARS_PER_TOKEN = 4  # conservative estimate
+# Token budget constants.
+_BASE_TOKEN_BUDGET = 3000  # minimum budget for focused queries
+_MAX_TOKEN_BUDGET = 8000   # hard ceiling for any query
+_CHARS_PER_TOKEN = 4       # conservative estimate
+
+# Keep old name as alias for backward compatibility with existing tests.
+_MAX_CONTEXT_TOKENS = _BASE_TOKEN_BUDGET
+
+
+def _compute_token_budget(intent: dict, selected_count: int, total_nodes: int) -> int:
+    """Compute dynamic token budget based on intent and data volume.
+
+    Scales up for broad/relational intents with many nodes. Floors at
+    _BASE_TOKEN_BUDGET and caps at _MAX_TOKEN_BUDGET.
+    """
+    budget = _BASE_TOKEN_BUDGET
+
+    # Compact scaling: each extra node beyond 5 gets 300 tokens of headroom
+    if intent.get("compact") and selected_count > 5:
+        budget += (selected_count - 5) * 300
+
+    # Intent multiplier
+    intent_type = intent.get("intent", "general")
+    if intent_type in ("temporal_broad", "relational"):
+        budget = int(budget * 1.5)
+    elif intent_type == "domain_filter":
+        budget = int(budget * 1.2)
+
+    # Graph scale factor: more data = slightly more context
+    if total_nodes > 200:
+        budget = int(budget * 1.2)
+    elif total_nodes > 100:
+        budget = int(budget * 1.1)
+
+    return max(_BASE_TOKEN_BUDGET, min(_MAX_TOKEN_BUDGET, budget))
 
 
 # ── Soul loader ──
@@ -801,6 +854,84 @@ def _node_context_minimal(node: dict) -> str:
     return f"- {node.get('title', node['id'])} ({node.get('type', 'unknown')}) [ID: {node['id']}]"
 
 
+_TEMPORAL_NODE_TYPES = {"daily", "event", "experience", "memory"}
+
+
+def _node_context_oneliner(node: dict) -> str:
+    """Dense one-liner for high-volume Tier 1 — ~50-80 chars per node.
+
+    Temporal types (daily/event/experience/memory): date prefix + type + title + content snippet.
+    Other types: type + title + key metadata (status, priority, due date).
+    """
+    ntype = node.get("type", "unknown")
+    title = node.get("title", node.get("id", "unknown"))
+
+    # Truncate title to 30 chars
+    if len(title) > 30:
+        title = title[:27] + "..."
+
+    type_tag = f"[{ntype}]"
+
+    if ntype in _TEMPORAL_NODE_TYPES:
+        # Find a date to use as prefix
+        date_prefix = ""
+        for field in ("date", "scheduled_for", "deadline", "due"):
+            val = node.get(field)
+            if val:
+                try:
+                    if hasattr(val, "strftime"):
+                        parsed = val
+                    else:
+                        parsed = datetime.strptime(str(val).split("T")[0], "%Y-%m-%d").date()
+                    date_prefix = parsed.strftime("%a %d %b")
+                    break
+                except (ValueError, TypeError):
+                    continue
+
+        content = node.get("content", "").strip()
+        snippet = ""
+        if content:
+            # First clause up to 40 chars, cut at word boundary
+            clause = re.split(r"[.!?,;]", content)[0][:40]
+            if len(clause) == 40 and " " in clause:
+                clause = clause[:clause.rfind(" ")]
+            snippet = clause.strip()
+
+        if date_prefix:
+            line = f"{date_prefix}: {type_tag} {title}"
+        else:
+            line = f"{type_tag} {title}"
+        if snippet:
+            line = f"{line} — {snippet}"
+        return line
+    else:
+        # Non-temporal: use status/priority/due metadata
+        meta_parts: list[str] = []
+        status = node.get("status", "")
+        if status:
+            meta_parts.append(status)
+        priority = node.get("priority", "")
+        if priority:
+            meta_parts.append(f"{priority} priority")
+        for field in ("due", "deadline"):
+            val = node.get(field)
+            if val:
+                try:
+                    if hasattr(val, "strftime"):
+                        parsed = val
+                    else:
+                        parsed = datetime.strptime(str(val).split("T")[0], "%Y-%m-%d").date()
+                    meta_parts.append(f"due {parsed.strftime('%b %d')}")
+                    break
+                except (ValueError, TypeError):
+                    continue
+
+        line = f"{type_tag} {title}"
+        if meta_parts:
+            line = f"{line} — {', '.join(meta_parts)}"
+        return line
+
+
 def _node_context_compact(
     node: dict,
     neighbor_names: list[str],
@@ -1059,6 +1190,8 @@ class MentorAgent:
                 "candidates": [],
                 "nodes_in_context": {"tier1": 0, "tier2": 0, "tier3": 0},
                 "context_length_chars": len(bootstrap_ctx),
+                "token_budget": _BASE_TOKEN_BUDGET,
+                "format_used": "full",
             }
 
         # Step 0: Temporal query resolution — detect date phrases and find matching nodes
@@ -1122,6 +1255,8 @@ class MentorAgent:
                 "candidates": [],
                 "nodes_in_context": {"tier1": 0, "tier2": 0, "tier3": 0},
                 "context_length_chars": len(ctx),
+                "token_budget": _BASE_TOKEN_BUDGET,
+                "format_used": "full",
             }
 
         # Session-aware boosting: search on recent user messages for additional context
@@ -1284,6 +1419,55 @@ class MentorAgent:
                 c["selected"] = True
                 c["tier"] = 1
 
+        # Person expansion for relational intent — pull all 1-hop neighbors of the top person
+        if intent.get("expand_person"):
+            person_node = None
+            for r in top_results:
+                node = self.graph.get_node(r["id"])
+                if node and node.get("type") == "person":
+                    person_node = node
+                    break
+
+            if person_node:
+                linked_nodes = self.graph.get_neighbors(person_node["id"], depth=1)
+                # Sort by recency (most recently updated/created)
+                def _recency_key(n: dict) -> str:
+                    for field in ("updated", "created", "date"):
+                        val = n.get(field)
+                        if val:
+                            return str(val)
+                    return ""
+                linked_nodes.sort(key=_recency_key, reverse=True)
+
+                expansion_count = 0
+                for neighbor in linked_nodes:
+                    if expansion_count >= 20:
+                        break
+                    nid = neighbor.get("id")
+                    if not nid or nid in direct_ids:
+                        continue
+                    top_results.append({
+                        "id": nid,
+                        "title": neighbor.get("title", nid),
+                        "type": neighbor.get("type", "unknown"),
+                        "score": 0.5,
+                    })
+                    direct_ids.add(nid)
+                    candidates_debug.append({
+                        "id": nid,
+                        "title": neighbor.get("title", nid),
+                        "type": neighbor.get("type", "unknown"),
+                        "scores": {
+                            "semantic": 0.0, "domain": 0.0, "recency": 0.0, "centrality": 0.0,
+                            "temporal": 0.0, "session": 0.0, "status_penalty": 0.0,
+                            "permanence": 0.0, "total": 0.0,
+                        },
+                        "selected": True,
+                        "tier": 1,
+                        "source": "relational_expansion",
+                    })
+                    expansion_count += 1
+
         # Step 4: 2-hop graph traversal from direct matches
         hop1_ids: set[str] = set()
         hop2_ids: set[str] = set()
@@ -1301,8 +1485,17 @@ class MentorAgent:
         # Step 5: Assemble tiered context with token budget
         compact = intent.get("compact", False)
         context_parts: list[str] = []
-        char_budget = _MAX_CONTEXT_TOKENS * _CHARS_PER_TOKEN
+        token_budget = _compute_token_budget(intent, len(top_results), total_nodes)
+        char_budget = token_budget * _CHARS_PER_TOKEN
         chars_used = 0
+
+        # Determine Tier 1 format based on node count and compact flag
+        if len(top_results) > 12 and compact:
+            format_used = "oneliner"
+        elif compact:
+            format_used = "compact"
+        else:
+            format_used = "full"
 
         # Temporal facts header — pre-computed date facts at the TOP so Claude reads them first
         temporal_header_parts = [f"TODAY: {today.strftime('%A, %d %B %Y')}"]
@@ -1362,22 +1555,26 @@ class MentorAgent:
             context_parts.append(header)
             chars_used += len(header)
 
-        # Tier 1: Direct matches — compact format for broad queries, full content otherwise
+        # Tier 1: Direct matches — format depends on node count and compact flag
         tier1_count = 0
         for result in top_results:
             node = self.graph.get_node(result["id"])
             if node is None:
                 continue
-            neighbors = self.graph.get_neighbors(result["id"], depth=1)
-            neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
             rel_stats = (
                 relationship_data.get(result["id"])
                 if relationship_data and node.get("type") == "person"
                 else None
             )
-            if compact:
+            if format_used == "oneliner":
+                block = _node_context_oneliner(node)
+            elif format_used == "compact":
+                neighbors = self.graph.get_neighbors(result["id"], depth=1)
+                neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
                 block = _node_context_compact(node, neighbor_names, relationship_stats=rel_stats)
             else:
+                neighbors = self.graph.get_neighbors(result["id"], depth=1)
+                neighbor_names = [f"{n['title']} ({n['type']})" for n in neighbors]
                 block = _node_context_full(node, neighbor_names, relationship_stats=rel_stats)
 
             if chars_used + len(block) > char_budget:
@@ -1427,7 +1624,7 @@ class MentorAgent:
         logger.debug(
             f"Context assembled: {len(direct_ids)} direct, {len(hop1_ids)} hop-1, "
             f"{len(hop2_ids)} hop-2, ~{chars_used // _CHARS_PER_TOKEN} tokens, "
-            f"intent={intent['intent']}, compact={compact}"
+            f"intent={intent['intent']}, compact={compact}, format={format_used}"
         )
 
         return {
@@ -1439,6 +1636,8 @@ class MentorAgent:
             "candidates": candidates_debug,
             "nodes_in_context": {"tier1": tier1_count, "tier2": tier2_count, "tier3": tier3_count},
             "context_length_chars": chars_used,
+            "token_budget": token_budget,
+            "format_used": format_used,
         }
 
     def get_context(
@@ -1480,6 +1679,8 @@ class MentorAgent:
             "context_length_chars": result["context_length_chars"],
             "context_length_tokens_est": result["context_length_chars"] // _CHARS_PER_TOKEN,
             "nodes_in_context": result["nodes_in_context"],
+            "token_budget": result.get("token_budget", _BASE_TOKEN_BUDGET),
+            "format_used": result.get("format_used", "full"),
         }
 
     @staticmethod
