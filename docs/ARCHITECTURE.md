@@ -1,12 +1,48 @@
 # Athena — Architecture
 
-Technical reference for how the system works. For project overview and setup, see [README.md](../README.md).
+Technical reference for how the system works. For project overview and setup, see [README.md](../README.md). For MCP server design, see [MCP_SPEC.md](MCP_SPEC.md).
+
+---
+
+## System Architecture
+
+```
+┌──────────────────────────────────┐
+│  Claude (Desktop / Code / Web)   │
+│  - SOUL.md as project prompt     │
+│  - Native reasoning, streaming   │
+│  - Calls Athena tools as needed  │
+└──────────┬───────────────────────┘
+           │ MCP (stdio)
+           ▼
+┌──────────────────────────────────┐
+│  Athena MCP Server (Python)      │
+│  17 tools — zero API calls       │
+│  ├─ NetworkX graph engine        │
+│  ├─ ChromaDB vector index        │
+│  ├─ Schema parser                │
+│  ├─ Vault parser + writer        │
+│  ├─ Conflict service             │
+│  ├─ Accountability service       │
+│  ├─ Relationship service         │
+│  └─ Audit service                │
+└──────────┬───────────────────────┘
+           │
+           ▼
+┌──────────────────────────────────┐
+│  vault/ (markdown + YAML)        │
+│  7 domains, 27 types             │
+│  git-tracked, Obsidian-compatible│
+└──────────────────────────────────┘
+```
+
+Claude does all reasoning natively. The MCP server is a deterministic data layer — graph traversal, vector search, conflict detection, and file I/O.
 
 ---
 
 ## Boot Sequence
 
-When `python3 server.py` runs:
+When `python3 mcp_server.py` runs:
 
 ```
 1. parse_schema("vault/_meta/schema.md")
@@ -22,86 +58,82 @@ When `python3 server.py` runs:
 4. VectorIndex.rebuild(nodes)
    → indexes all node content into ChromaDB for semantic search
 
-5. MentorAgent(graph, vector_index, schema)
-   → loads SOUL.md, builds system prompt from schema + personality
-   → ready to accept chat messages
+5. VaultService instantiated
+   → receives graph, vector_index, schema, rebuild/refresh functions
 
-6. Flask app registers blueprints, serves on port 5001
+6. FastMCP registers 17 tools
+   → each tool closes over graph, vector_index, schema, vault_service
+
+7. MCP server starts (stdio transport)
+   → ready for Claude to call tools
 ```
-
-Components are stored on `app.config` for blueprint access via `current_app.config`.
 
 ---
 
-## Chat Message Lifecycle
+## Tool Categories
 
-```
-User sends message
-        │
-        ▼
-POST /api/chat/stream (SSE)
-        │
-        ▼
-ChatService.stream_message()
-  ├─ Save user message to ChatStore
-  ├─ Load conversation history
-  │
-  ▼
-MentorAgent.chat_stream()
-  ├─ get_context(query, history)
-  │   ├─ Classify domains (keyword heuristics, no API call)
-  │   ├─ Semantic search (ChromaDB, top 10)
-  │   ├─ Session topic boost (last 5 user messages)
-  │   ├─ Score: semantic + domain + recency + centrality + session
-  │   ├─ Take top 5, traverse 2 hops (NetworkX)
-  │   └─ Tiered assembly: direct (full) → 1-hop (summary) → 2-hop (one-liner)
-  │       Cap at ~3000 tokens
-  │
-  ├─ Build messages: system prompt + history + context + user message
-  ├─ client.messages.stream() → Claude API
-  │
-  ├─ Yield ("text", token) for each streamed chunk
-  │   └─ Buffer any <graph_updates> block (don't stream to frontend)
-  │
-  └─ Yield ("done", {response, graph_updates, relevant_nodes})
-        │
-        ▼
-ChatService post-processing
-  ├─ _dedup_check() — annotate creates with potential duplicates
-  ├─ Save assistant message to ChatStore
-  └─ Yield final SSE event to frontend
-        │
-        ▼
-Frontend renders text + GraphUpdateCards (accept / dismiss / merge)
-```
+### Search & Read
+| Tool | Purpose |
+|------|---------|
+| `search_vault` | Semantic search with optional type/domain filters |
+| `read_node` | Full node content + frontmatter + neighbors |
+| `list_nodes` | Filter by type, domain, or status |
+| `get_graph_stats` | Total nodes, edges, type/domain breakdowns |
+| `get_schema` | Full schema — types, domains, edges, fields |
+| `get_activity` | Recent create/update timeline |
+
+### Write
+| Tool | Purpose |
+|------|---------|
+| `write_node` | Create node with dedup check + permanence warning |
+| `update_node` | Patch node with cascade proposals |
+| `delete_node` | Archive to `_backup/` |
+
+### Graph
+| Tool | Purpose |
+|------|---------|
+| `traverse_neighbors` | Multi-hop traversal (1-3 hops) |
+| `find_cross_references` | Suggest links based on content similarity |
+
+### Analysis
+| Tool | Purpose |
+|------|---------|
+| `detect_conflicts` | Check intention against graph for contradictions |
+| `check_accountability` | Streaks, overdue commitments, fundamentals |
+| `check_relationships` | Person health, mention frequency, drift |
+| `audit_vault` | Stale statuses, orphans, broken links |
+
+### Admin
+| Tool | Purpose |
+|------|---------|
+| `rebuild_vault` | Full re-parse + re-index |
+| `vault_repair` | Fix structural issues in vault files |
 
 ---
 
 ## Node Write Lifecycle
 
 ```
-User accepts a graph update card
+Claude calls write_node(node_id, title, type, content, frontmatter, edges)
         │
         ▼
-POST /api/vault/write
-  {node_id, title, type, content, edges, frontmatter}
-        │
-        ▼
-VaultService.write()
-  ├─ _sanitize_id() — lowercase, underscores→hyphens, strip special chars
+MCP Server
   ├─ Validate type against schema.type_list
-  ├─ get_folder_for_type() — resolve vault folder from schema
-  ├─ Build markdown: YAML frontmatter + # Title + content + ## Section wikilinks
+  ├─ Dedup check via vector search (threshold 0.85)
+  ├─ Check permanence level → return warning if identity/fundamental
+  │
+  ▼
+VaultService.write()
+  ├─ _sanitize_id() — lowercase, hyphens, strip special chars
+  ├─ get_folder_for_type() — resolve folder from schema
+  ├─ Build markdown: YAML frontmatter + # Title + content + wikilinks
   ├─ Write to vault/{folder}/{node_id}.md
-  ├─ rebuild_all() — re-parse vault, rebuild graph + vector index
+  ├─ refresh_after_write() — re-parse vault, upsert to vector index
   └─ find_cross_references(node_id)
-      ├─ Reverse scan: existing nodes mentioning this node's title
-      ├─ Forward scan: this node's content mentioning existing titles
-      └─ Semantic similarity: related nodes not yet linked
         │
         ▼
-Returns {ok, filepath, stats, suggested_links}
-  → Frontend shows suggested link cards
+Returns {ok, filepath, stats, suggested_links, duplicate_warnings, permanence_warning}
+  → Claude sees warnings and acts accordingly
 ```
 
 ---
@@ -124,7 +156,7 @@ Each type specifies:
 - **Domain** — which domain it belongs to
 - **Folder** — vault path (e.g. `Self/Goals`)
 - **Frontmatter** — type-specific YAML fields (e.g. `status`, `priority` for goals)
-- **Description** — used in system prompt for AI type selection
+- **Description** — used by Claude for type selection
 
 ---
 
@@ -178,56 +210,7 @@ I want to learn to play piano at an intermediate level.
 | `## Met At` | `met_at` |
 | Outside any section | `relates_to` (default) |
 
-This makes the vault Obsidian-compatible — wikilinks render as clickable references.
-
----
-
-## Hybrid Retrieval Pipeline
-
-When the agent needs context for a query:
-
-1. **Domain classification** — keyword heuristics map the query to likely domains (no API call)
-2. **Semantic search** — ChromaDB returns top 10 candidates by embedding similarity
-3. **Session topic boost** — extract last 5 user messages, run additional searches, +0.05 per topic hit
-4. **Scoring** — combine: semantic similarity + domain relevance + recency (created/updated) + graph centrality + session boost
-5. **Top-K selection** — take top 5 scored nodes
-6. **Graph traversal** — 2-hop expansion via NetworkX (undirected view)
-7. **Tiered assembly** — direct matches get full content, 1-hop neighbors get summaries, 2-hop get one-liners. Cap at ~3000 tokens.
-
----
-
-## Streaming Architecture
-
-Chat uses Server-Sent Events (SSE) via `POST /api/chat/stream`:
-
-- Flask `Response(generator(), mimetype='text/event-stream')`
-- The mentor agent's `chat_stream()` yields text tokens as they arrive from Claude
-- `<graph_updates>` XML blocks are buffered (never streamed to the user)
-- After the stream completes, a final `done` event carries the full response, parsed graph updates, and relevant nodes
-- Frontend uses `fetch` with `ReadableStream` (not `EventSource` — needs POST body)
-
-SSE event types:
-- `text` — streamed token: `{"type": "text", "content": "..."}`
-- `done` — stream complete: `{"type": "done", "response": "...", "graph_updates": [...], "relevant_nodes": [...]}`
-- `error` — failure: `{"type": "error", "error": "..."}`
-
----
-
-## Backend Structure
-
-`server.py` is an app factory (~90 lines). Routes are Flask blueprints in `routes/`. Business logic lives in `services/`.
-
-```
-server.py              create_app() — boot, wire, serve
-routes/
-  chat_routes.py       /api/chat/*, /api/chat/stream
-  graph_routes.py      /api/graph/*, /api/node/*, /api/search, /api/schema, /api/activity
-  vault_routes.py      /api/vault/write, /api/vault/update, /api/vault/rebuild, /api/vault/repair
-  insights_routes.py   /api/insights
-services/
-  vault_service.py     File I/O, cross-referencing, repair, helper functions
-  chat_service.py      Message orchestration, dedup checking
-```
+Compatible with Obsidian — wikilinks render as clickable references.
 
 ---
 
@@ -235,10 +218,30 @@ services/
 
 Adding a new node type requires zero code changes:
 
-1. **Edit `vault/_meta/schema.md`** — add a `### type_name` block under the TYPES section with domain, folder, description, and frontmatter fields
-2. **Add a domain row** if the type belongs to a new domain (in the DOMAINS table)
-3. **Create a template** in `vault/_templates/` (optional, for default frontmatter)
-4. **Create the folder** in `vault/` matching the folder path
-5. **Restart the backend** — schema is parsed at boot
+1. **Edit `vault/_meta/schema.md`** — add a `### type_name` block under the TYPES section
+2. **Add a domain row** if the type belongs to a new domain
+3. **Create a template** in `vault/_templates/` (optional)
+4. **Create the folder** in `vault/`
+5. **Restart the MCP server** — schema is parsed at boot
 
-The system prompt, validation rules, folder routing, and frontend type rendering all derive automatically from the schema.
+Claude sees the updated schema via `get_schema` and adapts automatically.
+
+---
+
+## Backend Structure
+
+```
+mcp_server.py          Boot sequence + 17 tool definitions (FastMCP)
+permanence.py          Permanence levels, status penalties, scoring
+vault_parser.py        Markdown → nodes + edges
+vault_graph.py         NetworkX graph wrapper
+schema_parser.py       Parses schema.md at boot
+vector_search.py       ChromaDB semantic search
+services/
+  vault_service.py     File I/O, cross-referencing, repair, cascade
+  conflict_service.py  Contradiction detection (signals + topic matching)
+  accountability_service.py  Streaks, overdue, fundamentals monitoring
+  relationship_service.py    Person mentions, health scoring
+  state_service.py     User state inference from message patterns
+  audit_service.py     Vault structural health scanning
+```

@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
-from mentor_agent import _get_permanence
+from permanence import get_permanence
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ def detect_conflicts(
 
         seen_ids.add(nid)
         node_type = node.get("type", "unknown")
-        permanence_level, _ = _get_permanence(node_type)
+        permanence_level, _ = get_permanence(node_type)
         conflicts.append({
             "node_id": nid,
             "title": node.get("title", nid),

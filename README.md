@@ -1,56 +1,45 @@
 # Athena
 
-A self-hosted personal knowledge graph with an AI agent that captures, connects, and explores everything that matters to you.
+A personal knowledge graph with an AI interface that captures, connects, and explores everything that matters to you.
 
-Athena builds a graph about your life — goals, fears, people, places, habits, finances, ideas, plans — stored as plain markdown files. The AI agent (named Athena) is sharp, direct, and strategic: she thinks in systems, surfaces connections you'd miss, and aggressively proposes graph updates from every conversation.
+Athena builds a graph about your life — goals, fears, people, places, habits, finances, ideas, plans — stored as plain markdown files. Claude connects to the graph via MCP and acts as Athena: sharp, direct, and strategic. She thinks in systems, surfaces connections you'd miss, and aggressively proposes graph updates from every conversation.
 
-**Local-first.** Everything runs on your machine. The only external call is to the Claude API for reasoning.
+**Local-first.** The vault lives on your machine as plain markdown. The MCP server does graph traversal, vector search, and deterministic analysis — no API calls. Claude does all reasoning natively via your subscription.
 
 ## Quick Start
 
 ```bash
-# Backend (requires ANTHROPIC_API_KEY in backend/.env)
+# Install dependencies
 cd backend
 pip3 install -r requirements.txt
-python3 server.py                  # localhost:5001
 
-# Frontend
-cd frontend
-npm install
-npm run dev                        # localhost:5173
+# Set vault path
+echo "VAULT_PATH=../vault" > .env
 ```
 
-Create `backend/.env`:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
+### Claude Desktop
 
-### Docker (Production)
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
-```bash
-# 1. Create secrets
-mkdir -p deployment/secrets
-
-# API key for Claude
-echo "sk-ant-..." > deployment/secrets/anthropic_api_key.txt
-
-# Auth token: maps a bearer token to a user defined in deployment/config/config.yaml
-cat > deployment/secrets/auth_tokens.yaml << 'EOF'
-your-secret-token-here: web_ui
-EOF
-
-# Nginx proxy auth header (must match a token in auth_tokens.yaml)
-cat > deployment/secrets/proxy_auth.conf << 'EOF'
-proxy_set_header Authorization "Bearer your-secret-token-here";
-EOF
-
-# 2. Build and run
-docker compose up --build       # proxy on localhost:8080
+```json
+{
+  "mcpServers": {
+    "athena": {
+      "command": "python3",
+      "args": ["/path/to/athena/backend/mcp_server.py"],
+      "env": {
+        "VAULT_PATH": "/path/to/athena/vault"
+      }
+    }
+  }
+}
 ```
 
-Generate a secure token with: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+Then create a **Project** in Claude Desktop and paste [SOUL.md](SOUL.md) as the project instructions.
 
-Three containers: nginx reverse proxy (`:8080`) → Svelte frontend + Flask backend on an internal Docker network.
+### Claude Code
+
+The `.mcp.json` in the project root auto-configures the server.
 
 ## Tech Stack
 
@@ -60,9 +49,8 @@ Three containers: nginx reverse proxy (`:8080`) → Svelte frontend + Flask back
 | Schema | `vault/_meta/schema.md` — single source of truth |
 | Graph engine | NetworkX — in-memory directed graph |
 | Vector search | ChromaDB — local semantic similarity |
-| API server | Flask — REST on localhost:5001 |
-| AI reasoning | Claude via Anthropic SDK |
-| Frontend | Svelte 5 + Vite |
+| MCP server | Python (FastMCP) — 17 tools, no API calls |
+| AI reasoning | Claude via subscription (Desktop, Code, or claude.ai) |
 
 ## Project Structure
 
@@ -73,32 +61,34 @@ athena/
 │   ├── _meta/schema.md       # Executable schema — domains, types, edges
 │   └── _templates/            # Node file templates
 ├── backend/
-│   ├── server.py              # App factory (~90 lines)
-│   ├── routes/                # Flask blueprints (chat, graph, vault, insights)
-│   ├── services/              # Business logic (vault_service, chat_service)
-│   ├── mentor_agent.py        # Claude integration + hybrid retrieval
+│   ├── mcp_server.py          # MCP server entry point (FastMCP, 17 tools)
+│   ├── permanence.py          # Node permanence levels and scoring
 │   ├── vault_parser.py        # Markdown → nodes + edges
 │   ├── vault_graph.py         # NetworkX graph wrapper
 │   ├── schema_parser.py       # Parses schema.md at boot
 │   ├── vector_search.py       # ChromaDB semantic search
-│   ├── chat_store.py          # Chat session persistence (JSON)
-│   └── tests/                 # pytest suite (118 tests)
-├── frontend/
-│   └── src/
-│       ├── App.svelte         # Root — view switching, Cmd+K search
-│       └── lib/               # ChatView, GraphView, NodeDetail, Sidebar, etc.
+│   ├── services/
+│   │   ├── vault_service.py   # File I/O, cross-referencing, repair
+│   │   ├── conflict_service.py # Contradiction detection
+│   │   ├── accountability_service.py # Streaks, commitments, fundamentals
+│   │   ├── relationship_service.py   # Person mention tracking, health
+│   │   ├── audit_service.py   # Vault structural health
+│   │   └── state_service.py   # User state inference
+│   └── tests/                 # pytest suite
+├── archive/                   # Archived V1 code (Flask frontend, mentor_agent)
 ├── docs/
 │   ├── ARCHITECTURE.md        # Technical deep-dive
-│   └── archive/               # Historical specs (V1, V2, V4)
+│   ├── MCP_SPEC.md            # MCP server design spec
+│   └── ROADMAP.md             # Stage 1-4 roadmap
 ├── CLAUDE.md                  # Dev instructions (for Claude Code)
-└── SOUL.md                    # Athena's personality definition
+└── SOUL.md                    # Athena's personality (→ Claude project prompt)
 ```
 
 ## How It Works
 
 ### Schema-Driven
 
-Everything flows from `vault/_meta/schema.md`. At boot, the backend parses it to extract domains, types, frontmatter fields, folder mappings, and edge types. The system prompt, validation rules, and folder structure all derive from this one file. Adding a new node type means editing schema.md and creating a template — zero code changes.
+Everything flows from `vault/_meta/schema.md`. At boot, the MCP server parses it to extract domains, types, frontmatter fields, folder mappings, and edge types. Adding a new node type means editing schema.md — zero code changes.
 
 ### Two-Tier Type System
 
@@ -114,18 +104,15 @@ Everything flows from `vault/_meta/schema.md`. At boot, the backend parses it to
 | Places | place |
 | Finance | expense, subscription, budget |
 
-### AI Agent
+### MCP Tools
 
-Athena uses hybrid retrieval to pull relevant context before every Claude call:
+Claude connects to the graph through 17 tools:
 
-1. Classify query domains (keyword heuristics)
-2. Semantic search via ChromaDB
-3. Session topic boost from recent messages
-4. Score & rank: semantic + domain + recency + centrality
-5. 2-hop graph traversal in NetworkX
-6. Tiered context assembly (~3000 tokens)
-
-Responses stream via SSE. The agent returns clean text plus `<graph_updates>` blocks proposing creates, updates, or links. The frontend renders these as accept/dismiss cards.
+**Search & Read** — `search_vault`, `read_node`, `list_nodes`, `get_graph_stats`, `get_schema`, `get_activity`
+**Write** — `write_node`, `update_node`, `delete_node`
+**Graph** — `traverse_neighbors`, `find_cross_references`
+**Analysis** — `detect_conflicts`, `check_accountability`, `check_relationships`, `audit_vault`
+**Admin** — `rebuild_vault`, `vault_repair`
 
 ### Vault Format
 
@@ -135,21 +122,11 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical deep-dive.
 
 ## Athena's Personality
 
-Athena is the goddess of wisdom and strategy. She sees the whole board — sharp, direct, no filler. Her personality is defined in [SOUL.md](SOUL.md) and parsed at boot.
-
-## Testing
-
-```bash
-cd backend
-python3 -m pytest tests/ -v
-python3 -m pytest tests/ -v --cov=. --cov-report=term-missing
-```
-
-118 tests covering vault parsing, graph operations, schema parsing, chat sessions, vault writes/updates, and API routes.
+Athena is the goddess of wisdom and strategy. She sees the whole board — sharp, direct, no filler. Her personality is defined in [SOUL.md](SOUL.md) and loaded as a Claude project system prompt.
 
 ## Privacy
 
 - All data stays on your machine in `vault/` as plain markdown
-- The only external call is to the Claude API for reasoning
+- The MCP server makes zero external calls — all processing is local
+- Claude reasoning is handled by your subscription, same as any Claude conversation
 - No telemetry, analytics, or tracking
-- Chat sessions stored locally as JSON files

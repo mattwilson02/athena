@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from mentor_agent import _get_permanence
+from permanence import get_permanence
 from middleware.security import safe_resolve
 
 logger = logging.getLogger(__name__)
@@ -445,7 +445,7 @@ class VaultService:
         # --- Step 4: Annotate proposals targeting identity/fundamental nodes ---
         for proposal in result_proposals:
             p_type = proposal.get("type", "")
-            level, _ = _get_permanence(p_type)
+            level, _ = get_permanence(p_type)
             warning = _PERMANENCE_WARNINGS.get(level)
             if warning:
                 proposal["permanence_warning"] = warning

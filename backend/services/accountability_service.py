@@ -6,7 +6,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 
-from mentor_agent import _get_permanence
+from permanence import get_permanence
 
 logger = logging.getLogger(__name__)
 
@@ -518,7 +518,7 @@ def trace_consequences(graph, node_id: str, max_hops: int = 2) -> list[dict]:
 
     _PERM_ORDER = {"identity": 0, "strategic": 1, "tactical": 2, "ephemeral": 3}
     consequences.sort(
-        key=lambda c: _PERM_ORDER.get(_get_permanence(c.get("type", ""))[0], 2)
+        key=lambda c: _PERM_ORDER.get(get_permanence(c.get("type", ""))[0], 2)
     )
     return consequences
 

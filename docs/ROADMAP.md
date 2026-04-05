@@ -276,17 +276,76 @@ Rethink the type system from scratch. Current 27 types grew organically with unc
 
 ---
 
-## What's Parked (Stage 2+)
+## Stage 1 Audit — Known Issues
 
-| Capability | Stage | Notes |
-|-----------|-------|-------|
-| Calendar integration | 2 | Read/write, time blocks |
-| Notification/reminder system | 2 | Push-based nudges |
-| Layered daily schedule | 2 | Non-negotiables + exceptions + strategic fill |
-| Voice ingestion | 2 | Transcription → structured extraction |
-| Full what-if simulation | 2 | Scenario modelling against full graph |
-| Energy/rhythm prediction | 2 | Longitudinal pattern analysis |
-| Purpose discovery engine | 2 | Emergent + directed + dialectic |
-| Telegram restart | 2 | Needs container rebuild + security hardening |
-| Multi-agent orchestration | 2 | Split monolithic mentor_agent Claude call into specialist agents (retrieval, conflict detection, synthesis) running in parallel. Enables cheaper models for search (haiku), focused context windows, lower latency. Only worth it when single-call approach hits quality or cost ceilings. |
-| Multi-user | 4 | Family/household shared context |
+Issues discovered during post-Stage-1 testing. Must be resolved before Stage 2 begins.
+
+| # | Issue | Severity | Root Cause | Fix |
+|---|-------|----------|------------|-----|
+| 1 | **Conflict detection false positives** — two examples: (a) sharing a nutrition protocol triggered 5 HARD goal contradictions because "skip breakfast" matched `_NEGATION_SIGNALS` and topic words like "cut" matched goal titles; (b) asking about buying an iPhone triggered SOFT "priority inversion" conflicts against a Ben catchup task and a daily planning note — completely unrelated nodes. | High | Three compounding issues: (a) `_NEGATION_SIGNALS` fires on any occurrence of skip/quit/stop, not just first-person intentions; (b) topic word matching is too loose — coincidental word overlap in unrelated nodes creates false connections; (c) system prompt gives Claude no room to dismiss false positives ("You MUST acknowledge"). | (a) Require first-person framing for negation signals ("I'm going to skip" vs "skip breakfast"); (b) tighten topic matching — require 2+ topic word matches or stronger semantic similarity threshold; (c) add intent classification gate — distinguish "sharing information"/"asking a question" from "expressing intention" before conflict pipeline runs; (d) soften system prompt from MUST to SHOULD with permission to dismiss irrelevant conflicts. |
+| 2 | **Daily node day names off by one** — "Monday March 24" should be "Tuesday March 24". Claude miscalculates day names when creating daily nodes for dates other than today. | Medium | No naming convention in graph instructions. Claude guesses day names instead of deriving from the TODAY header. Some are correct, some off by one — inconsistent. | Added daily naming rule to graph instructions (section 7) requiring Claude to derive day names by counting from the TODAY header. Fixed in `mentor_agent.py`. |
+
+---
+
+## MCP Pivot (April 2026)
+
+Stage 1 was built as Flask API + Svelte frontend + Claude API. After Stage 1, the architecture was refactored to an MCP server. Claude connects directly to the knowledge graph via tools. No more custom UI, no more API billing, no more prompt engineering in Python.
+
+**What this changes for future stages:**
+
+- **Voice** — free. Claude Desktop and mobile already support voice. No work needed.
+- **Streaming** — free. Claude handles this natively.
+- **Multi-agent orchestration** — irrelevant. There's no monolithic mentor_agent to split. Claude is the single agent, tools are the specialists.
+- **Telegram bridge** — replaced by Claude mobile app or future MCP-over-HTTP for remote access.
+- **Custom frontend** — archived. Claude's native UI is the interface. Graph visualisation could return as a standalone lightweight tool if needed.
+- **Calendar integration** — becomes an MCP tool or a separate MCP server (Google Calendar MCP already exists on claude.ai).
+- **Notifications** — becomes a scheduled Claude agent or cron-triggered tool call.
+
+---
+
+## Stage 2: "Action & Integration" (post-audit)
+
+> Move from thinking and planning to action. Connect Athena to external systems via MCP. Claude orchestrates.
+
+### In Scope
+
+1. **Calendar MCP integration** — connect Google Calendar. Claude sees schedule alongside graph, can reason about time allocation vs goals.
+2. **Scheduled check-ins** — cron-triggered Claude sessions that call `check_accountability`, surface overdue items, and message you (via Telegram, email, or push).
+3. **Daily planning agent** — scheduled morning session that reads today's calendar, checks accountability, scans fundamentals, and proposes a structured day.
+4. **What-if simulation** — Claude reasons over full graph to model "what happens if I drop X" or "what does my life look like if I commit to Y."
+5. **Energy/rhythm prediction** — analyse daily nodes longitudinally for patterns (energy by day of week, productivity cycles, stress triggers).
+6. **Purpose discovery** — emergent goal identification from graph patterns. What themes keep appearing? What's the user gravitating toward that they haven't named yet?
+
+### Out of Scope
+- Multi-user (Stage 4)
+- Custom UI rebuild (not planned — Claude's UI is sufficient)
+
+---
+
+## Stage 3: "Ambient Intelligence"
+
+> Athena operates without being asked. Proactive, predictive, always watching.
+
+- Predictive alerts ("You usually burn out after 3 weeks of this pattern")
+- Ambient data ingestion (health APIs, location, reading habits)
+- Long-term pattern recognition across months/years
+- Autonomous graph maintenance (merge duplicates, retire stale nodes, strengthen weak links)
+
+---
+
+## Stage 4: "Shared Context"
+
+> Multi-user. Family/household shared graph with private subgraphs.
+
+---
+
+## What's Resolved (no longer needed)
+
+| Capability | Why |
+|-----------|-----|
+| Voice ingestion | Claude Desktop/mobile already has voice — free |
+| Streaming chat | Claude handles natively — free |
+| Multi-agent orchestration | No monolithic agent to split — architecture is already tool-based |
+| Telegram bot bridge | Claude mobile app covers mobile access. MCP-over-HTTP for remote access if needed |
+| Custom frontend | Archived. Claude's native UI is the interface |
+| Docker multi-container setup | Replaced by single Python process started by Claude |

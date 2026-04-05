@@ -1,6 +1,6 @@
 # Athena — Project Instructions
 
-> See [README.md](README.md) for project overview. See [SOUL.md](SOUL.md) for Athena's personality. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for technical deep-dive.
+> See [README.md](README.md) for project overview. See [SOUL.md](SOUL.md) for Athena's personality. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for technical deep-dive. See [docs/MCP_SPEC.md](docs/MCP_SPEC.md) for MCP server design.
 
 ## Tech Stack
 
@@ -10,10 +10,8 @@
 | Schema | `vault/_meta/schema.md` — single source of truth, parsed at boot |
 | Graph engine | NetworkX (Python) — in-memory directed graph |
 | Vector search | ChromaDB (local) — semantic similarity |
-| API server | Flask + flask-cors — REST, localhost:5001 |
-| AI reasoning | Claude via Anthropic SDK |
-| Frontend | Svelte 5 + Vite — localhost:5173 |
-| Colours | `frontend/src/lib/colors.js` — shared type/domain colour maps |
+| MCP server | Python (FastMCP) — 17 tools, zero API calls |
+| AI reasoning | Claude via subscription (Desktop, Code, or claude.ai) |
 
 ## Directory Structure
 
@@ -29,164 +27,93 @@ athena/
 │   ├── Finance/Expenses/Subscriptions/Budgets/
 │   ├── _meta/schema.md           # Executable schema — domains, types, edges
 │   ├── _templates/               # Node file templates
-│   └── _backup/                  # Archived V1 nodes (skipped by parser)
+│   └── _backup/                  # Archived nodes (skipped by parser)
 ├── backend/
-│   ├── server.py                 # App factory (~90 lines) — boot + blueprint registration
-│   ├── routes/
-│   │   ├── chat_routes.py        # /api/chat/*, /api/chat/stream (SSE)
-│   │   ├── graph_routes.py       # /api/graph/*, /api/node/*, /api/search, /api/activity
-│   │   ├── vault_routes.py       # /api/vault/*
-│   │   └── insights_routes.py    # /api/insights
-│   ├── services/
-│   │   ├── vault_service.py      # File I/O, cross-referencing, repair (thread-safe)
-│   │   ├── audit_service.py      # Vault health auditing (stale, orphans, broken links)
-│   │   └── chat_service.py       # Message orchestration (streaming + sync)
-│   ├── schema_parser.py          # Parses schema.md at boot
+│   ├── mcp_server.py             # MCP server entry point (FastMCP, 17 tools)
+│   ├── permanence.py             # Node permanence levels and scoring
 │   ├── vault_parser.py           # Markdown → nodes + edges
 │   ├── vault_graph.py            # NetworkX graph wrapper
+│   ├── schema_parser.py          # Parses schema.md at boot
 │   ├── vector_search.py          # ChromaDB semantic search
-│   ├── mentor_agent.py           # Claude integration + hybrid retrieval
-│   ├── chat_store.py             # Chat session persistence (JSON files)
+│   ├── services/
+│   │   ├── vault_service.py      # File I/O, cross-referencing, repair (thread-safe)
+│   │   ├── conflict_service.py   # Contradiction detection
+│   │   ├── accountability_service.py # Streaks, commitments, fundamentals
+│   │   ├── relationship_service.py   # Person mention tracking, health
+│   │   ├── state_service.py      # User state inference
+│   │   └── audit_service.py      # Vault structural health
+│   ├── middleware/
+│   │   └── security.py           # Path traversal prevention
+│   ├── tests/                    # pytest suite
 │   ├── requirements.txt
-│   └── .env                      # ANTHROPIC_API_KEY (never commit)
-├── frontend/
-│   ├── src/
-│   │   ├── App.svelte            # Root — view switching, Cmd+K search, schema loading
-│   │   ├── app.css               # Dark theme, CSS custom properties
-│   │   ├── main.js               # Svelte 5 mount
-│   │   └── lib/
-│   │       ├── api.js            # Fetch wrappers + streamMessage() for SSE
-│   │       ├── colors.js         # Shared type/domain colour maps
-│   │       ├── format.js         # Zero-dep markdown → HTML formatter
-│   │       ├── ChatView.svelte   # Streaming chat + starter prompts
-│   │       ├── GraphView.svelte  # Canvas force-directed graph
-│   │       ├── NodeDetail.svelte # Slide-in node detail + edit mode
-│   │       ├── Sidebar.svelte    # Sessions, stats, domain filters, insights
-│   │       ├── GraphUpdateCard.svelte  # Accept/dismiss/merge cards
-│   │       ├── SearchModal.svelte      # Cmd+K global search
-│   │       └── TimelineView.svelte     # Activity timeline
-│   ├── index.html
-│   ├── vite.config.js
-│   └── package.json
-├── deployment/
-│   ├── config/config.yaml        # App config (auth, users, Telegram, Claude model)
-│   ├── secrets/                  # Auth tokens, API key, proxy auth (never commit)
-│   ├── nginx/nginx.conf          # Reverse proxy config
-│   └── n8n/                      # n8n automation (Telegram ↔ Athena bridge)
-│       ├── docker-compose.yml    # Separate n8n service
-│       ├── workflow.json         # Importable workflow backup
-│       └── .env                  # n8n encryption key
+│   └── .env                      # VAULT_PATH only
+├── archive/                      # V1 code (Flask, Svelte, mentor_agent)
 ├── docs/
 │   ├── ARCHITECTURE.md           # Technical deep-dive
-│   ├── V5_SPEC.md                # V5 spec (containerisation, auth, Telegram)
-│   └── archive/                  # Historical specs (V1, V2, V4, TEST_PLAN)
-├── docker-compose.yml            # Production: proxy + frontend + backend
-├── SOUL.md                       # Athena's identity, voice, values, boundaries
+│   ├── MCP_SPEC.md               # MCP server design spec
+│   ├── ROADMAP.md                # Roadmap and audit log
+│   └── archive/                  # Historical specs
+├── .mcp.json                     # Claude Code MCP server config
+├── SOUL.md                       # Athena's personality (→ Claude project prompt)
 ├── README.md                     # Project overview + quick start
 └── CLAUDE.md                     # This file
 ```
 
 ## Running
 
-### Dev Mode (bare processes)
+### MCP Server (local)
 
 ```bash
-# Backend (requires ANTHROPIC_API_KEY in backend/.env)
-cd backend && python3 server.py    # runs on port 5001
-
-# Frontend
-cd frontend && npm run dev         # runs on port 5173
+cd backend
+pip3 install -r requirements.txt
+python3 mcp_server.py              # starts on stdio (MCP transport)
 ```
 
-### Production (Docker)
-
-```bash
-docker compose up --build          # proxy on :8080, backend + frontend internal
-```
-
-Three-container architecture: nginx reverse proxy (`:8080`) → Svelte frontend + Flask backend on an internal Docker network. Backend also on a gateway network for Claude API access.
-
-| Container | Networks | Published ports |
-|-----------|----------|-----------------|
-| `athena-proxy` | proxy-net, athena-net | `127.0.0.1:8080:80` |
-| `athena-frontend` | athena-net | None (fully isolated) |
-| `athena` | athena-net, gateway-net | None |
-
-### Telegram Bot (n8n)
-
-```bash
-cd deployment/n8n && N8N_DOMAIN=<tunnel-domain> docker compose up -d
-```
-
-n8n bridges Telegram ↔ Athena via a 3-node workflow: Telegram Trigger → HTTP Request (`/api/chat/simple`) → Send Message. Requires a Cloudflare tunnel for webhook delivery.
-
-Note: On macOS with system Python 3.9, all backend files use `from __future__ import annotations` for modern type hint syntax. Flask runs on port **5001** (macOS AirPlay conflict on 5000).
+The server starts automatically when Claude Desktop or Claude Code connects — you don't need to run it manually. Configure via `.mcp.json` (Claude Code) or `claude_desktop_config.json` (Claude Desktop).
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full technical deep-dive (boot sequence, data flows, retrieval pipeline, vault format, extension guide).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full technical deep-dive.
 
 Key points for development:
 - `vault/_meta/schema.md` is the single source of truth — parsed at boot, drives everything
-- `server.py` is an app factory (~90 lines). Components stored on `app.config` for blueprint access
+- `mcp_server.py` boots the graph, registers 17 tools via FastMCP
 - 7 domains, 27 types — never hardcode, always derive from schema
 - Wikilinks under `## Section` headings define edge types (see ARCHITECTURE.md for full mapping)
+- The MCP server makes zero external API calls — all processing is local
 
-## Authentication & Permissions
+## MCP Tools
 
-All API endpoints require a bearer token (`Authorization: Bearer <token>`). Tokens and user mappings live in `deployment/secrets/auth_tokens.yaml`. Permissions are configured in `deployment/config/config.yaml`:
+### Search & Read
+- `search_vault(query, n, types, domains)` — semantic search with filters
+- `read_node(node_id)` — full content + frontmatter + neighbors
+- `list_nodes(type, domain, status)` — filtered listing
+- `get_graph_stats()` — counts and breakdowns
+- `get_schema()` — full schema definition
+- `get_activity(limit)` — recent timeline
 
-| User | Endpoints | Use case |
-|------|-----------|----------|
-| `web_ui` | `*` (all) | Browser frontend |
-| `n8n` | `chat`, `vault` | n8n automation |
-| `telegram` | `chat` | Telegram bot (chat only) |
-
-Telegram sessions use a **chat ID allowlist** — only IDs listed in `config.yaml` under `telegram.allowed_chat_ids` can use the bot. Unknown senders get 403.
-
-## API Endpoints
-
-### Health
-- `GET /api/health` — health check (used by Docker healthchecks)
-
-### Chat
-- `GET /api/chat/sessions` — list sessions
-- `POST /api/chat/sessions` — create session
-- `GET /api/chat/sessions/:id` — get session with messages
-- `PATCH /api/chat/sessions/:id` — rename session
-- `DELETE /api/chat/sessions/:id` — delete session
-- `POST /api/chat/sessions/:id/dismiss` — dismiss a graph update
-- `POST /api/chat` — send message (sync) `{session_id, message}` → `{response, graph_updates, relevant_nodes}`
-- `POST /api/chat/simple` — non-streaming text-only chat for Telegram/n8n `{session_id, message}` → `{response}`. Auto-creates tg-* sessions, handles confirm/dismiss keywords for pending graph updates.
-- `POST /api/chat/stream` — send message (SSE) → text/done/error events
+### Write
+- `write_node(node_id, title, type, content, frontmatter, edges)` — create with dedup/permanence checks
+- `update_node(node_id, ...)` — patch with cascade proposals
+- `delete_node(node_id)` — archive to `_backup/`
 
 ### Graph
-- `GET /api/graph` — all nodes + edges
-- `GET /api/graph/stats` — counts and type breakdown
-- `GET /api/node/:id` — single node + neighbors with edge types
-- `GET /api/nodes?type=X&domain=Y` — filter by type or domain
-- `GET /api/schema` — parsed schema (domains, types, frontmatter, colours)
-- `GET /api/search?q=X` — title substring + semantic search (combined)
-- `GET /api/activity?limit=N` — timeline of created/updated nodes
-- `POST /api/graph/suggest-links` — AI-powered link suggestions
+- `traverse_neighbors(node_id, depth)` — multi-hop traversal
+- `find_cross_references(node_id)` — suggest links
 
-### Insights
-- `GET /api/insights` — Athena's strategic analysis of the full graph
+### Analysis
+- `detect_conflicts(message)` — check intention against graph
+- `check_accountability()` — streaks, overdue, fundamentals
+- `check_relationships(lookback_days)` — person health and drift
+- `audit_vault()` — structural issues
 
-### Vault
-- `POST /api/vault/write` — write node, returns suggested_links
-- `POST /api/vault/update` — patch existing node (frontmatter, content, tags, edges)
-- `POST /api/vault/rebuild` — rebuild graph + vector indexes
-- `POST /api/vault/repair` — walk vault and fix corrupted files
-- `POST /api/vault/audit` — scan vault for stale statuses, orphans, broken wikilinks, type mismatches
-- `POST /api/vault/import` — scan `_backup/` for archived nodes, validate types, dedup, return proposals
-- `POST /api/vault/import/accept` — accept a single import proposal `{node_id, source, type_override}`
+### Admin
+- `rebuild_vault()` — full re-parse + re-index
+- `vault_repair()` — fix structural issues
 
 ## Code Style
 
 - Python: snake_case, type hints, docstrings on public methods, `from __future__ import annotations`
-- Svelte 5: `$props()`, `$state()`, `$effect()`, `$derived()` — no legacy `export let` or `$:`
-- One colour source: `frontend/src/lib/colors.js` — never hardcode TYPE_COLORS elsewhere
 - Keep modules focused — each backend file does one thing
 - No over-engineering. Simple > clever.
 
@@ -195,6 +122,5 @@ Telegram sessions use a **chat ID allowlist** — only IDs listed in `config.yam
 - Never commit `.env` or API keys
 - Never add telemetry, analytics, or external tracking
 - Never store user data outside `vault/`
-- Never make outbound calls other than to the Claude API
-- Never hardcode type colours — use `colors.js`
+- Never make outbound API calls from the MCP server
 - Never hardcode type lists — derive from schema

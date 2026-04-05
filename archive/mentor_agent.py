@@ -593,7 +593,14 @@ Pick specific edge types over generic relates_to:
 - Belief supporting a goal → supported_by
 - Idea contradicting a belief → contradicts
 
-── 7. FORMAT ──
+── 7. DAILY NODE NAMING ──
+Daily nodes MUST use this title format: "[Day] [Month] [Date], [Year] — [Topic]"
+Example: "Tuesday March 25, 2026 — Morning Planning"
+IMPORTANT: Always derive the day name from the TODAY header. If TODAY is Tuesday March 25, then \
+tomorrow is Wednesday March 26 and yesterday was Monday March 24. Do NOT guess day names — \
+count from the TODAY header to get them right.
+
+── 8. FORMAT ──
 Wrap graph updates in <graph_updates> tags after your response text:
 
 <graph_updates>
@@ -631,7 +638,7 @@ Wrap graph updates in <graph_updates> tags after your response text:
 ]
 </graph_updates>
 
-── 8. COMMITMENTS ──
+── 9. COMMITMENTS ──
 When the user makes an explicit promise ("I'll do X by Friday", "I commit to X", "I promise to Y", \
 "I'll have it done by Z"), tag the graph update with commitment metadata:
 

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "athena": {
+      "command": "/opt/homebrew/Cellar/python@3.11/3.11.15/bin/python3.11",
+      "args": ["backend/mcp_server.py"],
+      "cwd": "/Users/matt/development/athena",
+      "env": {
+        "VAULT_PATH": "/Users/matt/development/athena/vault"
+      }
+    }
+  }
+}
