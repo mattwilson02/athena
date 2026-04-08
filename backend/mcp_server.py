@@ -69,6 +69,43 @@ vault_service = VaultService(
 
 logger.info("Boot complete")
 
+
+# ---------------------------------------------------------------------------
+# Schema validation helpers
+# ---------------------------------------------------------------------------
+
+def _parse_valid_statuses() -> dict[str, list[str]]:
+    """Parse valid status values per type from schema.md comments."""
+    import re
+    result = {}
+    schema_file = os.path.join(vault_path, "_meta", "schema.md")
+    current_type = None
+    with open(schema_file, "r") as f:
+        for line in f:
+            # Detect type headers like ### goal
+            m = re.match(r'^###\s+(\w+)', line)
+            if m:
+                current_type = m.group(1)
+            # Detect status lines with comments like: status: active  # active | paused | completed
+            if current_type and line.strip().startswith("status:") and "#" in line:
+                comment = line.split("#", 1)[1].strip()
+                statuses = [s.strip() for s in comment.split("|") if s.strip()]
+                if statuses:
+                    result[current_type] = statuses
+    return result
+
+
+_VALID_STATUSES = _parse_valid_statuses()
+
+
+def _validate_status(node_type: str, status: str) -> str | None:
+    """Return error message if status is invalid for this type, else None."""
+    valid = _VALID_STATUSES.get(node_type)
+    if valid and status and status not in valid:
+        return f"Invalid status '{status}' for type '{node_type}'. Valid: {valid}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # MCP Server
 # ---------------------------------------------------------------------------
@@ -243,6 +280,13 @@ async def write_node(node_id: str, title: str, type: str, content: str = "", fro
         return json.dumps({"error": f"Invalid type '{type}'. Valid types: {valid_types}"})
 
     fm = json.loads(frontmatter) if isinstance(frontmatter, str) else frontmatter
+
+    # Validate status against schema
+    status_val = fm.get("status", "")
+    if status_val:
+        err = _validate_status(type, status_val)
+        if err:
+            return json.dumps({"error": err})
     edge_list = json.loads(edges) if isinstance(edges, str) else edges
 
     duplicate_warnings = []
@@ -312,13 +356,19 @@ async def update_node(node_id: str, title: str = "", content: str = "", append_c
     if status:
         changes["status"] = status
 
+    # Validate status against schema
+    node_type = node.get("type", "")
+    if status:
+        err = _validate_status(node_type, status)
+        if err:
+            return json.dumps({"error": err})
+
     if status == "superseded":
         fm = changes.get("frontmatter", {})
         if not fm.get("superseded_by"):
             return json.dumps({"error": "Cannot set status to 'superseded' without 'superseded_by' in frontmatter"})
 
     permanence_warning = None
-    node_type = node.get("type", "")
     level, _ = get_permanence(node_type)
     if level in ("identity", "fundamental"):
         permanence_warning = f"Modifying a {level}-level node ({node.get('title', node_id)})."

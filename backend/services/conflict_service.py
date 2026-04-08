@@ -32,11 +32,19 @@ _ACTION_INTENTIONS = [
     "thinking about", "thinking of",
 ]
 
-_NEGATION_SIGNALS = [
-    "skip", "quit", "stop", "cancel", "drop", "give up",
+# First-person negation — requires "I" framing to avoid matching instructional text
+_NEGATION_SIGNALS_FIRST_PERSON = [
+    "i'm going to skip", "im going to skip", "i'll skip", "ill skip",
+    "i'm going to quit", "im going to quit", "i'll quit", "ill quit",
+    "i'm going to stop", "im going to stop", "i'll stop", "ill stop",
+    "i'm going to cancel", "im going to cancel", "i'll cancel",
+    "i'm going to drop", "im going to drop", "i'll drop",
+    "i want to quit", "i want to stop", "i want to cancel",
+    "i'm not going to", "im not going to",
     "not going to", "won't", "wont", "can't be bothered",
-    "don't want to", "dont want to", "scrap", "forget about",
-    "changed my mind", "pull out", "bail",
+    "don't want to", "dont want to", "scrap it", "forget about it",
+    "changed my mind", "pull out", "bail on",
+    "i give up", "giving up", "i quit",
 ]
 
 _CHANGE_SIGNALS = [
@@ -60,8 +68,9 @@ _ADMISSION_SIGNALS = [
 ]
 
 _AVOIDANCE_SIGNALS = [
-    "avoid", "skip", "not going to", "can't face", "cant face",
-    "too scared", "not ready", "put off", "postpone", "dodge",
+    "i'm avoiding", "im avoiding", "i avoid",
+    "not going to", "can't face", "cant face",
+    "too scared", "not ready", "putting it off", "i postpone", "dodging",
 ]
 
 _MONETARY_INDICATORS = [
@@ -185,7 +194,7 @@ def detect_conflicts(
 def _detect_signals(message_lower: str) -> dict:
     """Detect what kind of intention signals are in the message."""
     has_action = any(s in message_lower for s in _ACTION_INTENTIONS)
-    has_negation = any(s in message_lower for s in _NEGATION_SIGNALS)
+    has_negation = any(s in message_lower for s in _NEGATION_SIGNALS_FIRST_PERSON)
     has_change = any(s in message_lower for s in _CHANGE_SIGNALS)
     has_spending = any(s in message_lower for s in _SPENDING_SIGNALS)
     has_admission = any(s in message_lower for s in _ADMISSION_SIGNALS)
@@ -245,8 +254,12 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
     has_admission = signals.get("has_admission", False)
 
     # Topic matching — does the message reference this node's subject?
+    # Require 2+ word matches to avoid false positives from coincidental overlap.
+    # Exception: if the full title appears as a substring, that's a direct reference.
     topic_words = _extract_topic_words(title, node.get("content", ""))
-    topic_match = any(re.search(rf'\b{re.escape(w)}\b', message_lower) for w in topic_words if len(w) > 2)
+    matching_words = [w for w in topic_words if len(w) > 2 and re.search(rf'\b{re.escape(w)}\b', message_lower)]
+    title_lower = title.lower()
+    topic_match = title_lower in message_lower or len(matching_words) >= 2
 
     # Budget: any spending triggers them (no topic match needed)
     # Events/tasks/projects: check date overlap even without topic match
@@ -323,7 +336,7 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
             "explanation": f"You have \"{title}\" scheduled around the same time",
         }
 
-    if node_type in ("task", "project"):
+    if node_type in ("task", "project") and topic_match:
         priority = node.get("priority", "medium")
         due = node.get("due") or node.get("deadline")
         if priority == "high" and due and _is_overdue(due):
@@ -392,7 +405,7 @@ def _has_new_commitment_signal(message_lower: str) -> bool:
     if not (has_action or has_spending_commitment):
         return False
     # Must also have a new commitment signal (not just any intention)
-    has_negation = any(s in message_lower for s in _NEGATION_SIGNALS)
+    has_negation = any(s in message_lower for s in _NEGATION_SIGNALS_FIRST_PERSON)
     if has_negation:
         return False
     return any(s in message_lower for s in _NEW_COMMITMENT_SIGNALS)
