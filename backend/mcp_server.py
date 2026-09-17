@@ -223,15 +223,13 @@ async def read_node(node_id: str) -> str:
         return json.dumps({"error": f"Node '{node_id}' not found"})
 
     neighbors = []
-    for neighbor_id, edge_data in graph.get_neighbors_with_edges(node_id):
-        neighbor_node = graph.get_node(neighbor_id)
-        if neighbor_node:
-            neighbors.append({
-                "id": neighbor_id,
-                "title": neighbor_node.get("title", neighbor_id),
-                "type": neighbor_node.get("type", "unknown"),
-                "edge_type": edge_data.get("type", "related"),
-            })
+    for neighbor_data in graph.get_neighbors_with_edges(node_id):
+        neighbors.append({
+            "id": neighbor_data["id"],
+            "title": neighbor_data.get("title", neighbor_data["id"]),
+            "type": neighbor_data.get("type", "unknown"),
+            "edge_type": neighbor_data.get("_edge_type", "related"),
+        })
 
     result = {
         "id": node["id"],
@@ -354,7 +352,7 @@ async def update_node(node_id: str, title: str = "", content: str = "", append_c
     if add_edges:
         changes["add_edges"] = json.loads(add_edges)
     if status:
-        changes["status"] = status
+        changes.setdefault("frontmatter", {})["status"] = status
 
     # Validate status against schema
     node_type = node.get("type", "")
@@ -373,9 +371,7 @@ async def update_node(node_id: str, title: str = "", content: str = "", append_c
     if level in ("identity", "fundamental"):
         permanence_warning = f"Modifying a {level}-level node ({node.get('title', node_id)})."
 
-    data = {"node_id": node_id}
-    data.update(changes)
-    result = vault_service.update(data)
+    result = vault_service.update({"node_id": node_id, "changes": changes})
     if permanence_warning:
         result["permanence_warning"] = permanence_warning
 
@@ -422,20 +418,19 @@ async def traverse_neighbors(node_id: str, depth: int = 1) -> str:
         next_layer = []
         hop_results = []
         for nid in current_layer:
-            for neighbor_id, edge_data in graph.get_neighbors_with_edges(nid):
+            for neighbor_data in graph.get_neighbors_with_edges(nid):
+                neighbor_id = neighbor_data["id"]
                 if neighbor_id in visited:
                     continue
                 visited.add(neighbor_id)
                 next_layer.append(neighbor_id)
-                neighbor_node = graph.get_node(neighbor_id)
-                if neighbor_node:
-                    hop_results.append({
-                        "id": neighbor_id,
-                        "title": neighbor_node.get("title", neighbor_id),
-                        "type": neighbor_node.get("type", "unknown"),
-                        "edge_type": edge_data.get("type", "related"),
-                        "via": nid,
-                    })
+                hop_results.append({
+                    "id": neighbor_id,
+                    "title": neighbor_data.get("title", neighbor_id),
+                    "type": neighbor_data.get("type", "unknown"),
+                    "edge_type": neighbor_data.get("_edge_type", "related"),
+                    "via": nid,
+                })
         result[f"hop_{hop}"] = hop_results
         current_layer = next_layer
 
@@ -458,7 +453,7 @@ async def find_cross_references(node_id: str) -> str:
         return json.dumps({"suggestions": []})
 
     results = vector_index.search(content, n=10)
-    existing = {n_id for n_id, _ in graph.get_neighbors_with_edges(node_id)}
+    existing = {n["id"] for n in graph.get_neighbors_with_edges(node_id)}
     suggestions = []
     for r in results:
         if r["id"] == node_id or r["id"] in existing:
