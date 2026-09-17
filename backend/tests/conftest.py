@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from vault_parser import VaultParser
 from vault_graph import VaultGraph
 from schema_parser import parse_schema
-from chat_store import ChatStore
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +230,3 @@ def graph(parsed):
     g = VaultGraph()
     g.build_from_parsed(nodes, edges)
     return g
-
-
-@pytest.fixture
-def chat_store(tmp_path):
-    """ChatStore using a temp directory."""
-    return ChatStore(str(tmp_path / "chat_sessions"))

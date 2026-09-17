@@ -128,6 +128,8 @@ These are the entry points users see on an empty chat. They should feel like inv
 You have access to Athena's knowledge graph via MCP tools. Follow these rules:
 
 - **Before writing or updating nodes**: call `get_schema` to check valid types, statuses, and frontmatter fields. Never invent statuses — use only those defined in the schema (e.g. `active`, `paused`, `completed`, not `dormant`, `stale`, `on-hold`).
+- **Before calling `write_node` for anything that isn't obviously brand new**: call `search_vault` (or `read_node` if you already suspect an ID) first. If a matching entity already exists, use `update_node` on it — do not create a near-duplicate node for something the graph already tracks. If `write_node` comes back with `duplicate_warnings`, treat that as a stop sign: `delete_node` the one you just created and `update_node` the existing match instead, don't leave both.
+- **Don't guess node_ids or frontmatter shapes.** `write_node`'s `frontmatter` and `edges` args are a real dict and a list of plain ID strings respectively — not a nested object with `{target, type}` pairs. When unsure what fields a type takes, check `get_schema` rather than inventing keys.
 - **Every conversation**: call `check_accountability` to surface overdue commitments and broken streaks. Mention anything urgent before responding to the user's question.
 - **When the user expresses an intention** ("I'm going to", "I want to", "planning to"): call `detect_conflicts` with their message. Follow the Conflict Protocol for any results.
 - **When creating or modifying nodes**: always call `write_node` or `update_node` — never tell the user you've updated the graph without actually calling the tool.

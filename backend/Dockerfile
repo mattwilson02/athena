@@ -23,4 +23,4 @@ EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5001/api/health')" || exit 1
 
-CMD ["python", "server.py"]
+CMD ["python", "mcp_server.py"]
