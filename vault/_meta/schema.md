@@ -294,6 +294,9 @@ category: other         # restaurant | city | country | bar | cafe | hotel | lan
 location:               # Optional. Parent location, city, or country.
 visited: false          # true | false
 rating:                 # Optional. 1-5. Only if visited.
+# status is optional — only for places under active evaluation (e.g. relocation candidates).
+# Leave it unset for a bar or restaurant you just visited.
+status:                 # idea | researching | shortlisted | visiting | booked | lived-in | ruled-out
 ```
 
 ### expense
