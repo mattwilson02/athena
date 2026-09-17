@@ -109,6 +109,9 @@ frequency: monthly      # daily | weekly | monthly | rare | inactive
 met_through:            # Optional. How you met.
 company:                # Optional. Where they work.
 location:               # Optional. City or region.
+# status is optional, legacy on some older person nodes — frequency is the primary signal now.
+# Don't invent new values; these two are the only ones in use.
+status:                 # active | minimal_contact
 ```
 
 ### organisation

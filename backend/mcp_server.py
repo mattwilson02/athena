@@ -97,6 +97,47 @@ def _parse_valid_statuses() -> dict[str, list[str]]:
 
 _VALID_STATUSES = _parse_valid_statuses()
 
+# Frontmatter keys every node may carry regardless of type — set by the writer
+# itself or genuinely universal, not something a type's schema block lists.
+_UNIVERSAL_FIELDS = {"id", "type", "title", "created", "updated", "tags", "filepath"}
+
+
+def _parse_known_fields() -> dict[str, set[str]]:
+    """Parse the frontmatter keys each type's schema block declares."""
+    import re
+    result: dict[str, set[str]] = {}
+    schema_file = os.path.join(vault_path, "_meta", "schema.md")
+    current_type = None
+    in_block = False
+    with open(schema_file, "r") as f:
+        for line in f:
+            m = re.match(r'^###\s+(\w+)', line)
+            if m:
+                current_type = m.group(1)
+                in_block = False
+                continue
+            if line.strip() == "```yaml":
+                in_block = True
+                result.setdefault(current_type, set())
+                continue
+            if line.strip() == "```":
+                in_block = False
+                continue
+            if in_block and current_type:
+                fm = re.match(r'^([a-zA-Z_][\w-]*):', line)
+                if fm:
+                    result[current_type].add(fm.group(1))
+    return result
+
+
+_KNOWN_FIELDS = _parse_known_fields()
+
+
+def _unknown_fields(node_type: str, frontmatter: dict) -> list[str]:
+    """Frontmatter keys not declared in this type's schema block or universal — for a warning, not a block."""
+    known = _KNOWN_FIELDS.get(node_type, set()) | _UNIVERSAL_FIELDS
+    return sorted(k for k in frontmatter if k not in known)
+
 
 def _validate_status(node_type: str, status: str) -> str | None:
     """Return error message if status is invalid for this type, else None."""
@@ -320,6 +361,13 @@ async def write_node(node_id: str, title: str, type: str, content: str = "",
             "real-world entity as what you just created, call delete_node on this new "
             "node_id and use update_node on the existing one instead."
         )
+    unknown = _unknown_fields(type, fm)
+    if unknown:
+        result["unknown_frontmatter_fields"] = unknown
+        result["unknown_frontmatter_warning"] = (
+            f"{unknown} aren't declared in schema.md for type '{type}'. Not blocked, but "
+            "check get_schema first next time — this is usually a sign of a guessed field name."
+        )
     if permanence_warning:
         result["permanence_warning"] = permanence_warning
 
@@ -391,6 +439,13 @@ async def update_node(node_id: str, title: str = "", content: str = "", append_c
     result = vault_service.update({"node_id": node_id, "changes": changes})
     if permanence_warning:
         result["permanence_warning"] = permanence_warning
+    unknown = _unknown_fields(node_type, changes.get("frontmatter", {}))
+    if unknown:
+        result["unknown_frontmatter_fields"] = unknown
+        result["unknown_frontmatter_warning"] = (
+            f"{unknown} aren't declared in schema.md for type '{node_type}'. Not blocked, but "
+            "check get_schema first next time — this is usually a sign of a guessed field name."
+        )
 
     return json.dumps(result, indent=2, default=str)
 
