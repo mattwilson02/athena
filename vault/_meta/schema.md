@@ -109,6 +109,9 @@ frequency: monthly      # daily | weekly | monthly | rare | inactive
 met_through:            # Optional. How you met.
 company:                # Optional. Where they work.
 location:               # Optional. City or region.
+# status is optional, legacy on some older person nodes — frequency is the primary signal now.
+# Don't invent new values; these two are the only ones in use.
+status:                 # active | minimal_contact
 ```
 
 ### organisation
@@ -294,6 +297,9 @@ category: other         # restaurant | city | country | bar | cafe | hotel | lan
 location:               # Optional. Parent location, city, or country.
 visited: false          # true | false
 rating:                 # Optional. 1-5. Only if visited.
+# status is optional — only for places under active evaluation (e.g. relocation candidates).
+# Leave it unset for a bar or restaurant you just visited.
+status:                 # idea | researching | shortlisted | visiting | booked | lived-in | ruled-out
 ```
 
 ### expense

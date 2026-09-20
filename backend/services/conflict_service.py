@@ -40,11 +40,12 @@ _NEGATION_SIGNALS_FIRST_PERSON = [
     "i'm going to cancel", "im going to cancel", "i'll cancel",
     "i'm going to drop", "im going to drop", "i'll drop",
     "i want to quit", "i want to stop", "i want to cancel",
+    "i want to skip", "i want to drop",
     "i'm not going to", "im not going to",
     "not going to", "won't", "wont", "can't be bothered",
     "don't want to", "dont want to", "scrap it", "forget about it",
     "changed my mind", "pull out", "bail on",
-    "i give up", "giving up", "i quit",
+    "i give up", "giving up", "i quit", "want to give up",
 ]
 
 _CHANGE_SIGNALS = [
@@ -68,10 +69,14 @@ _ADMISSION_SIGNALS = [
 ]
 
 _AVOIDANCE_SIGNALS = [
-    "i'm avoiding", "im avoiding", "i avoid",
+    "i'm avoiding", "im avoiding", "i avoid", "want to avoid",
     "not going to", "can't face", "cant face",
     "too scared", "not ready", "putting it off", "i postpone", "dodging",
 ]
+
+# Topic words too generic/common to trust as a single-word match on their own —
+# grows as real coincidental-overlap false positives get reported.
+_LOW_SIGNAL_TOPIC_WORDS = {"cut"}
 
 _MONETARY_INDICATORS = [
     "$", "£", "€", "cost", "price", "dollars", "pounds", "quid",
@@ -254,12 +259,16 @@ def _classify_conflict(message_lower: str, node: dict, signals: dict) -> dict | 
     has_admission = signals.get("has_admission", False)
 
     # Topic matching — does the message reference this node's subject?
-    # Require 2+ word matches to avoid false positives from coincidental overlap.
-    # Exception: if the full title appears as a substring, that's a direct reference.
+    # A single distinctive word match is enough (natural phrasing rarely repeats
+    # every word of a title — "skip gym" for a "Gym Workout" habit, not "skip gym
+    # workout"). Words too generic to be trusted alone — documented false positive:
+    # "cut" (nutrition message) coincidentally matched an unrelated "Cut to 83kg"
+    # goal — need a second match to count.
     topic_words = _extract_topic_words(title, node.get("content", ""))
     matching_words = [w for w in topic_words if len(w) > 2 and re.search(rf'\b{re.escape(w)}\b', message_lower)]
+    strong_matches = [w for w in matching_words if w not in _LOW_SIGNAL_TOPIC_WORDS]
     title_lower = title.lower()
-    topic_match = title_lower in message_lower or len(matching_words) >= 2
+    topic_match = title_lower in message_lower or len(strong_matches) >= 1 or len(matching_words) >= 2
 
     # Budget: any spending triggers them (no topic match needed)
     # Events/tasks/projects: check date overlap even without topic match

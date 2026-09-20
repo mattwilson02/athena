@@ -98,8 +98,11 @@ class VaultService:
         if edges:
             sections: dict[str, list[str]] = {}
             for edge in edges:
-                target = edge.get("target", "")
-                edge_type = edge.get("type", "relates_to")
+                if isinstance(edge, str):
+                    target, edge_type = edge, "relates_to"
+                else:
+                    target = edge.get("target", "")
+                    edge_type = edge.get("type", "relates_to")
                 if target:
                     target = _sanitize_id(target)
                     section = _edge_type_to_section(edge_type)
@@ -213,8 +216,11 @@ class VaultService:
 
         # Add edges
         for edge in changes.get("add_edges", []):
-            target = edge.get("target", "")
-            edge_type = edge.get("type", "relates_to")
+            if isinstance(edge, str):
+                target, edge_type = edge, "relates_to"
+            else:
+                target = edge.get("target", "")
+                edge_type = edge.get("type", "relates_to")
             if target:
                 target = _sanitize_id(target)
                 section = _edge_type_to_section(edge_type)

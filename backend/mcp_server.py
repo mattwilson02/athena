@@ -97,6 +97,47 @@ def _parse_valid_statuses() -> dict[str, list[str]]:
 
 _VALID_STATUSES = _parse_valid_statuses()
 
+# Frontmatter keys every node may carry regardless of type — set by the writer
+# itself or genuinely universal, not something a type's schema block lists.
+_UNIVERSAL_FIELDS = {"id", "type", "title", "created", "updated", "tags", "filepath"}
+
+
+def _parse_known_fields() -> dict[str, set[str]]:
+    """Parse the frontmatter keys each type's schema block declares."""
+    import re
+    result: dict[str, set[str]] = {}
+    schema_file = os.path.join(vault_path, "_meta", "schema.md")
+    current_type = None
+    in_block = False
+    with open(schema_file, "r") as f:
+        for line in f:
+            m = re.match(r'^###\s+(\w+)', line)
+            if m:
+                current_type = m.group(1)
+                in_block = False
+                continue
+            if line.strip() == "```yaml":
+                in_block = True
+                result.setdefault(current_type, set())
+                continue
+            if line.strip() == "```":
+                in_block = False
+                continue
+            if in_block and current_type:
+                fm = re.match(r'^([a-zA-Z_][\w-]*):', line)
+                if fm:
+                    result[current_type].add(fm.group(1))
+    return result
+
+
+_KNOWN_FIELDS = _parse_known_fields()
+
+
+def _unknown_fields(node_type: str, frontmatter: dict) -> list[str]:
+    """Frontmatter keys not declared in this type's schema block or universal — for a warning, not a block."""
+    known = _KNOWN_FIELDS.get(node_type, set()) | _UNIVERSAL_FIELDS
+    return sorted(k for k in frontmatter if k not in known)
+
 
 def _validate_status(node_type: str, status: str) -> str | None:
     """Return error message if status is invalid for this type, else None."""
@@ -223,15 +264,13 @@ async def read_node(node_id: str) -> str:
         return json.dumps({"error": f"Node '{node_id}' not found"})
 
     neighbors = []
-    for neighbor_id, edge_data in graph.get_neighbors_with_edges(node_id):
-        neighbor_node = graph.get_node(neighbor_id)
-        if neighbor_node:
-            neighbors.append({
-                "id": neighbor_id,
-                "title": neighbor_node.get("title", neighbor_id),
-                "type": neighbor_node.get("type", "unknown"),
-                "edge_type": edge_data.get("type", "related"),
-            })
+    for neighbor_data in graph.get_neighbors_with_edges(node_id):
+        neighbors.append({
+            "id": neighbor_data["id"],
+            "title": neighbor_data.get("title", neighbor_data["id"]),
+            "type": neighbor_data.get("type", "unknown"),
+            "edge_type": neighbor_data.get("_edge_type", "related"),
+        })
 
     result = {
         "id": node["id"],
@@ -264,22 +303,27 @@ async def get_schema() -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def write_node(node_id: str, title: str, type: str, content: str = "", frontmatter: str = "{}", edges: str = "[]") -> str:
-    """Create a new node in the vault. Returns filepath, stats, suggested links, and duplicate warnings.
+async def write_node(node_id: str, title: str, type: str, content: str = "",
+                      frontmatter: dict | None = None, edges: list[str] | None = None) -> str:
+    """Create a NEW node in the vault. Returns filepath, stats, suggested links, and duplicate warnings.
+
+    Call search_vault first. If the entity might already exist, use update_node instead —
+    write_node is only for genuinely new entities. If the response comes back with
+    duplicate_warnings, stop: delete_node this one and update_node the existing match instead.
 
     Args:
-        node_id: Node ID (becomes filename)
+        node_id: Node ID (becomes filename) — lowercase-kebab-case derived from title
         title: Node title
         type: Must be a valid schema type
         content: Markdown body
-        frontmatter: JSON string of YAML frontmatter fields
-        edges: JSON string array of wikilink target IDs
+        frontmatter: YAML frontmatter fields, e.g. {"status": "active"}
+        edges: Wikilink target node_ids, e.g. ["matt", "european-passport-acquisition"]
     """
     valid_types = schema.get("type_list", [])
     if valid_types and type not in valid_types:
         return json.dumps({"error": f"Invalid type '{type}'. Valid types: {valid_types}"})
 
-    fm = json.loads(frontmatter) if isinstance(frontmatter, str) else frontmatter
+    fm = frontmatter or {}
 
     # Validate status against schema
     status_val = fm.get("status", "")
@@ -287,7 +331,7 @@ async def write_node(node_id: str, title: str, type: str, content: str = "", fro
         err = _validate_status(type, status_val)
         if err:
             return json.dumps({"error": err})
-    edge_list = json.loads(edges) if isinstance(edges, str) else edges
+    edge_list = edges or []
 
     duplicate_warnings = []
     try:
@@ -311,6 +355,19 @@ async def write_node(node_id: str, title: str, type: str, content: str = "", fro
         "edges": edge_list,
     })
     result["duplicate_warnings"] = duplicate_warnings
+    if duplicate_warnings:
+        result["warning"] = (
+            "Possible duplicate(s) above 0.85 similarity. If one of these is the same "
+            "real-world entity as what you just created, call delete_node on this new "
+            "node_id and use update_node on the existing one instead."
+        )
+    unknown = _unknown_fields(type, fm)
+    if unknown:
+        result["unknown_frontmatter_fields"] = unknown
+        result["unknown_frontmatter_warning"] = (
+            f"{unknown} aren't declared in schema.md for type '{type}'. Not blocked, but "
+            "check get_schema first next time — this is usually a sign of a guessed field name."
+        )
     if permanence_warning:
         result["permanence_warning"] = permanence_warning
 
@@ -319,20 +376,26 @@ async def write_node(node_id: str, title: str, type: str, content: str = "", fro
 
 @mcp.tool()
 async def update_node(node_id: str, title: str = "", content: str = "", append_content: str = "",
-                      frontmatter: str = "", add_tags: str = "", remove_tags: str = "",
-                      add_edges: str = "", status: str = "") -> str:
-    """Update an existing node. Returns cascade proposals for connected nodes affected by the change.
+                      frontmatter: dict | None = None, add_tags: list[str] | None = None,
+                      remove_tags: list[str] | None = None, add_edges: list[str] | None = None,
+                      status: str = "") -> str:
+    """Update an EXISTING node. Returns cascade proposals for connected nodes affected by the change.
+
+    This is the default for anything that might already exist in the graph — prefer it over
+    write_node whenever you're recording a change to something rather than introducing a
+    brand-new entity. Call search_vault or read_node first to find the right node_id.
 
     Args:
         node_id: Node ID
         title: New title (empty = no change)
         content: Replace content (empty = no change)
         append_content: Append to content (empty = no change)
-        frontmatter: JSON string of fields to merge
-        add_tags: JSON string array of tags to add
-        remove_tags: JSON string array of tags to remove
-        add_edges: JSON string array of wikilink target IDs to add
-        status: New status (empty = no change)
+        frontmatter: Fields to merge, e.g. {"salary_range": "£75k+"}
+        add_tags: Tags to add, e.g. ["priority"]
+        remove_tags: Tags to remove
+        add_edges: Wikilink target node_ids to add, e.g. ["oscar-humphries"]
+        status: New status (empty = no change) — must match one of the values get_schema
+            returns for this node's type. Never invent a status value.
     """
     node = graph.get_node(node_id)
     if not node:
@@ -346,15 +409,15 @@ async def update_node(node_id: str, title: str = "", content: str = "", append_c
     if append_content:
         changes["append_content"] = append_content
     if frontmatter:
-        changes["frontmatter"] = json.loads(frontmatter)
+        changes["frontmatter"] = frontmatter
     if add_tags:
-        changes["add_tags"] = json.loads(add_tags)
+        changes["add_tags"] = add_tags
     if remove_tags:
-        changes["remove_tags"] = json.loads(remove_tags)
+        changes["remove_tags"] = remove_tags
     if add_edges:
-        changes["add_edges"] = json.loads(add_edges)
+        changes["add_edges"] = add_edges
     if status:
-        changes["status"] = status
+        changes.setdefault("frontmatter", {})["status"] = status
 
     # Validate status against schema
     node_type = node.get("type", "")
@@ -373,11 +436,16 @@ async def update_node(node_id: str, title: str = "", content: str = "", append_c
     if level in ("identity", "fundamental"):
         permanence_warning = f"Modifying a {level}-level node ({node.get('title', node_id)})."
 
-    data = {"node_id": node_id}
-    data.update(changes)
-    result = vault_service.update(data)
+    result = vault_service.update({"node_id": node_id, "changes": changes})
     if permanence_warning:
         result["permanence_warning"] = permanence_warning
+    unknown = _unknown_fields(node_type, changes.get("frontmatter", {}))
+    if unknown:
+        result["unknown_frontmatter_fields"] = unknown
+        result["unknown_frontmatter_warning"] = (
+            f"{unknown} aren't declared in schema.md for type '{node_type}'. Not blocked, but "
+            "check get_schema first next time — this is usually a sign of a guessed field name."
+        )
 
     return json.dumps(result, indent=2, default=str)
 
@@ -422,20 +490,19 @@ async def traverse_neighbors(node_id: str, depth: int = 1) -> str:
         next_layer = []
         hop_results = []
         for nid in current_layer:
-            for neighbor_id, edge_data in graph.get_neighbors_with_edges(nid):
+            for neighbor_data in graph.get_neighbors_with_edges(nid):
+                neighbor_id = neighbor_data["id"]
                 if neighbor_id in visited:
                     continue
                 visited.add(neighbor_id)
                 next_layer.append(neighbor_id)
-                neighbor_node = graph.get_node(neighbor_id)
-                if neighbor_node:
-                    hop_results.append({
-                        "id": neighbor_id,
-                        "title": neighbor_node.get("title", neighbor_id),
-                        "type": neighbor_node.get("type", "unknown"),
-                        "edge_type": edge_data.get("type", "related"),
-                        "via": nid,
-                    })
+                hop_results.append({
+                    "id": neighbor_id,
+                    "title": neighbor_data.get("title", neighbor_id),
+                    "type": neighbor_data.get("type", "unknown"),
+                    "edge_type": neighbor_data.get("_edge_type", "related"),
+                    "via": nid,
+                })
         result[f"hop_{hop}"] = hop_results
         current_layer = next_layer
 
@@ -458,7 +525,7 @@ async def find_cross_references(node_id: str) -> str:
         return json.dumps({"suggestions": []})
 
     results = vector_index.search(content, n=10)
-    existing = {n_id for n_id, _ in graph.get_neighbors_with_edges(node_id)}
+    existing = {n["id"] for n in graph.get_neighbors_with_edges(node_id)}
     suggestions = []
     for r in results:
         if r["id"] == node_id or r["id"] in existing:

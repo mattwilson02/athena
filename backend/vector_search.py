@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 
 import chromadb
+from chromadb.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,19 @@ class VectorIndex:
     def __init__(self, persist_dir: str) -> None:
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
+
+    def _with_retry(self, op):
+        """Run a collection operation, refetching the handle if it went stale.
+
+        A second server process rebuilding the index can recreate the
+        collection under us, leaving this instance holding a dead UUID.
+        """
+        try:
+            return op()
+        except NotFoundError:
+            logger.warning("Collection handle went stale, refetching")
+            self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
+            return op()
 
     @staticmethod
     def _build_doc(node: dict) -> tuple[str, dict]:
@@ -112,13 +126,19 @@ class VectorIndex:
             metadatas.append(metadata)
 
         # ChromaDB upsert handles batching internally
-        self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+        self._with_retry(
+            lambda: self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+        )
         logger.info(f"Indexed {len(ids)} nodes into ChromaDB")
 
     def upsert_one(self, node: dict) -> None:
         """Upsert a single node into the index without rebuilding."""
         doc, metadata = self._build_doc(node)
-        self.collection.upsert(ids=[node["id"]], documents=[doc], metadatas=[metadata])
+        self._with_retry(
+            lambda: self.collection.upsert(
+                ids=[node["id"]], documents=[doc], metadatas=[metadata]
+            )
+        )
 
     def delete_one(self, node_id: str) -> None:
         """Remove a single node from the index."""
@@ -238,10 +258,16 @@ class VectorIndex:
         return matches[:n]
 
     def rebuild(self, nodes: list[dict]) -> None:
-        """Delete and recreate the collection, then re-index."""
-        try:
-            self.client.delete_collection(COLLECTION_NAME)
-        except Exception:
-            pass  # Collection may already be gone (reloader race)
+        """Re-index every node and drop any that have left the vault.
+
+        Deliberately does not delete the collection. Two servers boot at once
+        (chat, and the shared pool behind Cowork and Code sessions) and a drop
+        leaves the other holding a dead handle.
+        """
         self.collection = self.client.get_or_create_collection(COLLECTION_NAME)
+        existing = set(self._with_retry(lambda: self.collection.get(include=[]))["ids"])
         self.index_all(nodes)
+        stale = list(existing - {node["id"] for node in nodes})
+        if stale:
+            self._with_retry(lambda: self.collection.delete(ids=stale))
+            logger.info(f"Dropped {len(stale)} stale nodes from ChromaDB")
